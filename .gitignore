@@ -1,0 +1,14 @@
+# Entorno virtual y bytecode
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Artefactos regenerables de cada corrida
+outputs/
+data/cache/
+
+# Sistema operativo / editores
+.DS_Store
+.idea/
+.vscode/

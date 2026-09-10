@@ -1,0 +1,6 @@
+# AM-PM · Asset Allocation Manager — dependencias
+# Python 3.10+
+pandas>=2.0
+numpy>=1.24
+scipy>=1.10
+sodapy>=2.2
