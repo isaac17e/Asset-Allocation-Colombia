@@ -99,6 +99,10 @@ class ConfigDatos:
     min_inversionistas: int = 25
     subtipos: tuple[str, ...] = SUBTIPOS_INVERTIBLES
     usar_cache: bool = True
+    #: Si la API falla, continuar con datos sintéticos en vez de detener la
+    #: corrida. Apagado por defecto: un portafolio sobre datos simulados que
+    #: llega al comité por un timeout es peor que una corrida fallida.
+    respaldo_sintetico: bool = False
     cache_dir: Path = Path("data/cache")
     #: Tamaño de lote de códigos de negocio por request y paginación SODA.
     chunk_codigos: int = 25
@@ -112,10 +116,12 @@ class ConfigOptimizacion:
     metodos: tuple[str, ...] = METODOS
     #: Intensidad de shrinkage de la matriz de covarianza (None = Ledoit-Wolf).
     shrinkage_cov: float | None = None
-    #: Peso de la media histórica frente a la media transversal (James-Stein).
+    #: Peso de la media histórica frente a la media de su clase de activo (James-Stein).
     shrinkage_mu: float = 0.60
-    #: Ventana (en observaciones) para la tasa libre de riesgo dinámica.
-    ventana_rf: int = 252
+    #: Ventana de la tasa libre de riesgo, en días calendario. None = la misma
+    #: ventana con que se estima μ: el exceso de retorno sólo tiene sentido si
+    #: ambos rendimientos cubren el mismo período (y el mismo ciclo de tasas).
+    ventana_rf_dias: int | None = None
     #: Fallback de r_f si no hay fondos RF_CORTO utilizables.
     rf_fallback: float = 0.085
     #: Multi-arranque del optimizador no lineal.
@@ -132,17 +138,26 @@ class ConfigRebalanceo:
     banda_categoria: float = 0.05
     banda_fondo: float = 0.03
     costo_bps: float = 25.0
+    #: Período de deriva simulada, en días calendario (un trimestre).
+    dias_deriva: int = 91
 
 
 @dataclass(frozen=True)
 class ConfigBacktest:
-    """Parámetros del backtest walk-forward."""
+    """
+    Parámetros del backtest walk-forward.
 
-    ventana_estimacion: int = 252
-    paso_rebalanceo: int = 63
+    Las ventanas se expresan en días calendario y se traducen a observaciones
+    con la frecuencia detectada del panel: los FICs publican 365 valores de
+    unidad al año y los ETFs ~252, así que un número fijo de observaciones no
+    representa el mismo lapso en ambos casos.
+    """
+
+    ventana_estimacion_dias: int = 365
+    paso_rebalanceo_dias: int = 91
     costo_bps: float = 25.0
-    #: Observaciones mínimas requeridas para ejecutar el backtest.
-    min_obs: int = 378
+    #: Historia mínima requerida para ejecutar el backtest (año y medio).
+    min_dias: int = 548
 
 
 @dataclass(frozen=True)

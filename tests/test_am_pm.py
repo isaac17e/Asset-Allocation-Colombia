@@ -18,23 +18,32 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from am_pm.backtest import ejecutar_backtest
 from am_pm.allocation import aplicar_cardinalidad, construir_portafolios, estadisticas_ex_ante
-from am_pm.config import CATEGORIAS, ConfigAM, ConfigDatos, ConfigOptimizacion
-from am_pm.ingestion import generar_datos_sinteticos
+from am_pm.config import CATEGORIAS, ConfigAM, ConfigBacktest, ConfigDatos, ConfigOptimizacion
+from am_pm import ingestion
+from am_pm.ingestion import cargar_datos, generar_datos_sinteticos
 from am_pm.metrics import (
     matriz_covarianza,
     max_drawdown,
+    observaciones_en,
     periodos_por_anio,
     ratio_sharpe,
     ratio_sortino,
     retorno_anualizado,
+    retornos_esperados,
     retornos_simples,
     volatilidad_anualizada,
 )
 from am_pm.optimizers import GrupoRestriccion, RestriccionesPortafolio, resolver
 from am_pm.profiles import PERFILES, construir_restricciones
 from am_pm.rebalancing import derivar_pesos, evaluar_bandas, plan_ordenes
-from am_pm.universe import calcular_rf_dinamica, clasificar_por_reglas, construir_universo
+from am_pm.universe import (
+    UniversoCurado,
+    calcular_rf_dinamica,
+    clasificar_por_reglas,
+    construir_universo,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -126,6 +135,41 @@ def test_rf_dinamica_refleja_la_categoria_corto_plazo() -> None:
     precios = pd.DataFrame({"A": serie, "B": serie}, index=fechas)
     categorias = pd.Series({"A": "RF_CORTO", "B": "RF_CORTO"})
     assert abs(calcular_rf_dinamica(precios, categorias, ventana=365) - tasa) < 0.002
+
+
+def test_rf_dinamica_sin_ventana_usa_todo_el_panel() -> None:
+    """Sin ventana, r_f cubre el mismo período que el μ estimado sobre el panel."""
+    fechas = pd.date_range("2024-01-01", periods=731, freq="D")
+    t = np.arange(len(fechas)) / 365.0
+    # Ciclo de tasas: 12% el primer año, 8% el segundo.
+    serie = np.where(t <= 1.0, 1.12 ** t, 1.12 * 1.08 ** (t - 1.0))
+    precios = pd.DataFrame({"A": serie}, index=fechas)
+    categorias = pd.Series({"A": "RF_CORTO"})
+    assert abs(calcular_rf_dinamica(precios, categorias) - retorno_anualizado(precios["A"])) < 1e-12
+    assert abs(calcular_rf_dinamica(precios, categorias, ventana=365) - 0.08) < 0.002
+
+
+def test_mu_se_contrae_hacia_su_clase_de_activo() -> None:
+    """Un fondo de liquidez no debe heredar retorno esperado de la renta variable."""
+    fechas = pd.date_range("2024-01-01", periods=731, freq="D")
+    t = np.arange(len(fechas)) / 365.0
+    precios = pd.DataFrame(
+        {"CAJA_1": 1.09 ** t, "CAJA_2": 1.10 ** t, "RV_1": 1.20 ** t, "RV_2": 1.30 ** t},
+        index=fechas,
+    )
+    grupos = pd.Series({"CAJA_1": "RF_CORTO", "CAJA_2": "RF_CORTO", "RV_1": "RV_LOCAL", "RV_2": "RV_LOCAL"})
+    mu = retornos_esperados(precios, 0.60, grupos)
+    assert abs(mu[["CAJA_1", "CAJA_2"]].mean() - 0.095) < 1e-3
+    assert mu[["CAJA_1", "CAJA_2"]].max() < 0.10 + 1e-6
+    sin_grupos = retornos_esperados(precios, 0.60)
+    assert sin_grupos["CAJA_1"] > mu["CAJA_1"] + 0.02
+
+
+def test_observaciones_en_respeta_la_frecuencia() -> None:
+    """Un año son 365 observaciones en FICs y 252 en series bursátiles."""
+    assert observaciones_en(365, 365.0) == 365
+    assert observaciones_en(365, 252.0) == 252
+    assert observaciones_en(91, 252.0) == 63
 
 
 def test_rf_dinamica_usa_fallback_sin_fondos_de_liquidez() -> None:
@@ -248,6 +292,17 @@ def test_cardinalidad_se_amplia_si_choca_con_los_minimos() -> None:
 # --------------------------------------------------------------------------- #
 # Rebalanceo
 # --------------------------------------------------------------------------- #
+def test_cardinalidad_rompe_empates_por_aum() -> None:
+    """Con pesos idénticos, la selección no puede depender del ruido numérico."""
+    activos = tuple(f"F{i}" for i in range(6))
+    restr = RestriccionesPortafolio(activos, np.zeros(6), np.full(6, 0.5), (), "PRUEBA")
+    aum = pd.Series([1, 2, 3, 6, 5, 4], index=list(activos), dtype=float)
+    for ruido in (1e-10, -1e-10):
+        pesos = pd.Series(np.full(6, 1 / 6) + ruido * np.arange(6), index=list(activos))
+        w = aplicar_cardinalidad(pesos, 2, restr, aum)
+        assert set(w[w > 1e-6].index) == {"F3", "F4"}
+
+
 def test_deriva_aumenta_el_peso_del_activo_ganador() -> None:
     fechas = pd.date_range("2024-01-01", periods=100, freq="D")
     precios = pd.DataFrame(
@@ -301,6 +356,87 @@ def test_pipeline_sintetico_end_to_end() -> None:
             assert abs(w.sum() - 1.0) < 1e-4, (nombre, metodo)
             rv = resultado.composicion.loc[list(("RV_LOCAL", "RV_INTERNACIONAL")), metodo].sum()
             assert rv <= perfil.rv_max + 1e-3, (nombre, metodo, rv)
+
+
+def _universo_ciclo_de_tasas() -> UniversoCurado:
+    """Panel de 3 años: la caja rinde 13% el primero y 7% después."""
+    rng = np.random.default_rng(3)
+    fechas = pd.date_range("2023-01-01", periods=1096, freq="D")
+    t = np.arange(len(fechas)) / 365.0
+    caja = np.where(t <= 1.0, 1.13 ** t, 1.13 * 1.07 ** (t - 1.0))
+    columnas, filas = {}, []
+    for i in range(6):
+        categoria = "RF_CORTO" if i < 3 else "RF_MEDIANO_LARGO"
+        ruido = rng.normal(0, 0.0002 if i < 3 else 0.002, len(fechas))
+        base = caja if i < 3 else 1.10 ** t
+        columnas[f"F{i}"] = 1000 * base * np.exp(np.cumsum(ruido))
+        nombre = "FIC LIQUIDEZ" if i < 3 else "FIC RENTA FIJA LARGO PLAZO"
+        filas.append({"fondo_id": f"F{i}", "nombre_patrimonio": f"{nombre} {i}",
+                      "nombre_subtipo_patrimonio": "FIC DE TIPO GENERAL", "categoria": categoria,
+                      "codigo_entidad": str(i), "aum_cop": 1e12})
+    precios = pd.DataFrame(columnas, index=fechas)
+    fondos = pd.DataFrame(filas).set_index("fondo_id")
+    rf_panel = calcular_rf_dinamica(precios, fondos["categoria"], fondos["aum_cop"])
+    return UniversoCurado(fondos, precios, retornos_simples(precios), rf_panel,
+                          fechas[-1], "SINTETICO")
+
+
+def test_sharpe_del_backtest_usa_la_rf_del_mismo_periodo() -> None:
+    """
+    Con tasas que caen, la r_f del panel completo queda por encima de lo que la
+    caja rindió durante el backtest y vuelve negativo el Sharpe de todo
+    portafolio de baja volatilidad. La referencia debe ser la caja del período.
+    """
+    universo = _universo_ciclo_de_tasas()
+    cfg_opt = replace(ConfigOptimizacion(), metodos=("EQUIPONDERADO",))
+    bt = ejecutar_backtest(universo, ConfigBacktest(), cfg_opt, ("CONSERVADOR",))
+
+    caja = bt.equity["BENCH::CAJA_RF_CORTO"]
+    assert abs(bt.rf_realizada - retorno_anualizado(caja)) < 0.003
+    assert universo.rf - bt.rf_realizada > 0.015
+    assert abs(bt.metricas.loc["BENCH::CAJA_RF_CORTO", "sharpe"]) < 1.0
+
+
+def test_backtest_reclasifica_con_la_informacion_de_cada_fecha() -> None:
+    """
+    Un fondo de nombre opaco, tranquilo dos años y volátil el tercero, es renta
+    fija media en el panel completo; en las primeras ventanas debe verse como
+    liquidez, que es lo único que se sabía de él en esas fechas.
+    """
+    universo = _universo_ciclo_de_tasas()
+    rng = np.random.default_rng(11)
+    n = len(universo.precios)
+    vol_diaria = np.where(np.arange(n) < 730, 0.003, 0.08) / np.sqrt(365)
+    universo.precios["OPACO"] = 1000 * np.exp(np.cumsum(rng.normal(0.0003, vol_diaria)))
+    universo.retornos = retornos_simples(universo.precios)
+    universo.fondos.loc["OPACO"] = {
+        "nombre_patrimonio": "FIC VALOR PLUS", "nombre_subtipo_patrimonio": "FIC DE TIPO GENERAL",
+        "categoria": "RF_MEDIANO_LARGO", "codigo_entidad": "9", "aum_cop": 1e12,
+    }
+    cfg_opt = replace(ConfigOptimizacion(), metodos=("EQUIPONDERADO",))
+    bt = ejecutar_backtest(universo, ConfigBacktest(), cfg_opt, ("CONSERVADOR",))
+    assert bt.rebalanceos["n_reclasificados"].iloc[0] >= 1
+
+
+def test_fallo_de_la_api_detiene_la_corrida_salvo_respaldo_explicito() -> None:
+    """Un timeout no puede convertir en silencio la corrida en una simulación."""
+
+    class _ClienteCaido:
+        def __init__(self, cfg) -> None:
+            raise ConnectionError("timeout simulado")
+
+    original = ingestion.ClienteFIC
+    ingestion.ClienteFIC = _ClienteCaido
+    try:
+        try:
+            cargar_datos(ConfigDatos())
+            raise AssertionError("Se esperaba ConnectionError sin respaldo sintético")
+        except ConnectionError:
+            pass
+        datos = cargar_datos(replace(ConfigDatos(), respaldo_sintetico=True))
+        assert datos.es_sintetico
+    finally:
+        ingestion.ClienteFIC = original
 
 
 def test_estadisticas_ex_ante_descomponen_el_riesgo() -> None:

@@ -32,6 +32,9 @@ python "Asset Allocation.py" --sin-backtest --app-token $SODA_APP_TOKEN
 # Reproducible offline mode (synthetic data) for testing
 python "Asset Allocation.py" --offline
 
+# If datos.gov.co fails the run stops; this lets it continue on simulated data
+python "Asset Allocation.py" --respaldo-sintetico
+
 # Open the HTML report in the browser when the run finishes
 python "Asset Allocation.py" --abrir
 
@@ -92,7 +95,9 @@ The five asset classes are `RF_CORTO` (short-term fixed income), `RF_MEDIANO_LAR
 
 ### 3. Dynamic risk-free rate
 
-`r_f` isn't an assumption. It is the AUM-weighted, compounded annualized return of the `RF_CORTO` class over the recent window: the Colombian client's real opportunity cost, the money market fund where their money already sits. It is re-estimated in every backtest window.
+`r_f` isn't an assumption. It is the AUM-weighted, compounded annualized return of the `RF_CORTO` class: the Colombian client's real opportunity cost, the money market fund where their money already sits. It is re-estimated in every backtest window.
+
+It is measured over **the same window as μ**. If μ covers four years and `r_f` only the last one, a rate-cutting cycle makes money market funds look like they beat `r_f` with almost no volatility: an artificial Sharpe ratio that pushes Markowitz to the fixed-income ceilings. `ventana_rf_dias` sets a different window explicitly.
 
 ### 4. Mandate constraints
 
@@ -116,20 +121,25 @@ All four methods solve over **the same feasible set**, so differences come from 
 
 HRP and 1/N are brought into the mandate by **Euclidean projection** onto the feasible set: the closest admissible portfolio to the proposed one.
 
-Σ is estimated with shrinkage toward constant correlation (Ledoit-Wolf-style intensity), and μ is shrunk toward the cross-sectional mean, to avoid chasing whichever fund did best last quarter.
+Σ is estimated with shrinkage toward constant correlation (Ledoit-Wolf-style intensity), and μ is shrunk toward the mean of **its own asset class**, to avoid chasing whichever fund did best last quarter. The target is the class, not the universe: shrinking a money market fund toward a mean that includes equities invents an excess return over `r_f` that it doesn't have.
 
 ### 6. Tactical rebalancing
 
-The buy-and-hold drift of the model portfolio is simulated, and current weights are compared with the targets. A deviation larger than ±5 percentage points in an asset class triggers an alert, with a suggested action and an order plan in COP, including turnover and estimated cost.
+The buy-and-hold drift of the model portfolio over the last quarter (91 calendar days) is simulated, and current weights are compared with the targets. A deviation larger than ±5 percentage points in an asset class triggers an alert, with a suggested action and an order plan in COP, including turnover and estimated cost.
 
 ### 7. Walk-forward backtest
 
 At each rebalance:
 - `r_f`, μ and Σ are re-estimated **only** from the previous window;
 - the eligible universe for that date is rebuilt;
+- every fund is **reclassified** with the volatility and betas of that window (not those of the full panel, which weren't known on that date);
 - the portfolio is re-optimized.
 
 Between rebalances, weights drift with the market, and turnover is charged at the configured rate. Results are compared with two passive benchmarks: cash (equal-weighted `RF_CORTO`) and the full equal-weighted universe.
+
+Windows are set in **calendar days** (365-day estimation, rebalancing every 91) and converted to observations using the panel's detected frequency: FICs publish 365 unit values a year and ETFs ~252, so "252 observations" is not a year for a FIC but about eight months.
+
+Realized Sharpe and Sortino ratios are measured against the `r_f` realized **during the backtest period** (AUM-weighted `RF_CORTO`), not the full-panel one: in a rate cycle, the gap between the two is enough to flip the sign of the Sharpe ratio for low-volatility portfolios.
 
 ---
 
@@ -179,7 +189,7 @@ Open it with a double click, or with `--abrir` at the end of the run. `--html PA
 
 ## Caveats
 
-- The backtest re-optimizes over the universe **as it exists today**. Funds that were liquidated or merged aren't in the current dataset, so there is survivorship bias. The results are useful for comparing methods with each other, not as a return forecast.
+- The backtest re-optimizes over the universe **as it exists today**. Funds are preselected by their current AUM, and those that were liquidated or merged aren't included, so there is survivorship bias. The asset class, however, is re-estimated at each date with the information available then. The results are useful for comparing methods with each other, not as a return forecast.
 - Transaction cost is a flat parameter (`--costo-bps`). It doesn't model early-withdrawal penalties or lock-up agreements, which are significant in several Colombian FICs.
 - The quantitative classification infers the asset class from price behavior, not from the prospectus. It is an input for the committee, not a replacement for reviewing each fund's regulations.
-- `--offline` generates synthetic data: it is useful for testing the code, never for making decisions.
+- `--offline` generates synthetic data: it is useful for testing the code, never for making decisions. For the same reason, an API failure stops the run instead of silently switching to simulated data (unless `--respaldo-sintetico` is set).

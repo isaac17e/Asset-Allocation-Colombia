@@ -33,6 +33,11 @@ def periodos_por_anio(index: pd.Index) -> float:
     return min(_FRECUENCIAS_CONOCIDAS, key=lambda f: abs(f - obs_anio))
 
 
+def observaciones_en(dias: float, ppa: float) -> int:
+    """Número de observaciones que cubren `dias` calendario a la frecuencia `ppa`."""
+    return max(1, int(round(dias * ppa / DIAS_CALENDARIO_ANIO)))
+
+
 def retornos_simples(precios: pd.DataFrame | pd.Series) -> pd.DataFrame | pd.Series:
     """Retornos aritméticos período a período, sin relleno de faltantes."""
     return precios.pct_change().replace([np.inf, -np.inf], np.nan).dropna(how="all")
@@ -208,17 +213,29 @@ def matriz_covarianza(
 
 
 def retornos_esperados(
-    precios: pd.DataFrame, shrinkage_transversal: float = 0.60
+    precios: pd.DataFrame, shrinkage_transversal: float = 0.60,
+    grupos: pd.Series | None = None,
 ) -> pd.Series:
     """
-    Vector de retornos esperados: CAGR histórico contraído hacia la media
-    transversal del universo (estimador tipo James-Stein). Reduce el sesgo de
-    la optimización hacia los fondos con mejor desempeño reciente.
+    Vector de retornos esperados: CAGR histórico contraído hacia la media de
+    su clase de activo (estimador tipo James-Stein). Reduce el sesgo de la
+    optimización hacia los fondos con mejor desempeño reciente.
+
+    El objetivo es la media de la clase y no la del universo: contraer un fondo
+    de liquidez hacia una media que incluye renta variable le atribuye un
+    exceso sobre r_f que no tiene, y con volatilidad de 0,3% ese exceso ficticio
+    se convierte en un Sharpe que domina la optimización. Sin `grupos` se usa
+    la media transversal del universo.
     """
     mu = precios.apply(retorno_anualizado)
     mu = mu.replace([np.inf, -np.inf], np.nan).dropna()
     if mu.empty:
         return mu
     gran_media = float(mu.mean())
+    if grupos is None:
+        objetivo = pd.Series(gran_media, index=mu.index)
+    else:
+        clase = grupos.reindex(mu.index)
+        objetivo = mu.groupby(clase).transform("mean").fillna(gran_media)
     peso = float(np.clip(shrinkage_transversal, 0.0, 1.0))
-    return peso * mu + (1.0 - peso) * gran_media
+    return peso * mu + (1.0 - peso) * objetivo

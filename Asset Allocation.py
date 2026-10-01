@@ -28,6 +28,8 @@ def construir_parser() -> argparse.ArgumentParser:
     g_datos.add_argument("--aum-minimo", type=float, default=30e9, help="AUM mínimo por fondo en COP (def. 30e9)")
     g_datos.add_argument("--sin-cache", action="store_true", help="Ignora la cache local y vuelve a descargar")
     g_datos.add_argument("--offline", action="store_true", help="Usa datos sintéticos reproducibles")
+    g_datos.add_argument("--respaldo-sintetico", action="store_true",
+                         help="Si la API falla, continúa con datos sintéticos en vez de detenerse")
 
     g_opt = p.add_argument_group("optimización")
     g_opt.add_argument("--perfil", action="append", choices=list(NOMBRES_PERFIL),
@@ -41,8 +43,10 @@ def construir_parser() -> argparse.ArgumentParser:
     g_reb = p.add_argument_group("rebalanceo y backtest")
     g_reb.add_argument("--banda", type=float, default=None, help="Banda de rebalanceo por categoría (def. 0.05)")
     g_reb.add_argument("--costo-bps", type=float, default=25.0, help="Costo de transacción en bps (def. 25)")
-    g_reb.add_argument("--ventana-estimacion", type=int, default=252, help="Observaciones por ventana (def. 252)")
-    g_reb.add_argument("--paso-rebalanceo", type=int, default=63, help="Observaciones entre rebalanceos (def. 63)")
+    g_reb.add_argument("--ventana-estimacion", type=int, default=365,
+                       help="Días calendario por ventana de estimación (def. 365)")
+    g_reb.add_argument("--paso-rebalanceo", type=int, default=91,
+                       help="Días calendario entre rebalanceos (def. 91)")
     g_reb.add_argument("--sin-backtest", action="store_true", help="Omite el backtest walk-forward")
 
     g_out = p.add_argument_group("presentación de resultados")
@@ -73,6 +77,7 @@ def construir_config(args: argparse.Namespace) -> ConfigAM:
         top_n_fondos=args.top_n,
         aum_minimo_cop=args.aum_minimo,
         usar_cache=not args.sin_cache,
+        respaldo_sintetico=args.respaldo_sintetico,
     )
     metodos = tuple(args.metodo) if args.metodo else cfg.optimizacion.metodos
     optimizacion = replace(cfg.optimizacion, metodos=metodos, shrinkage_mu=args.shrinkage_mu)
@@ -81,8 +86,8 @@ def construir_config(args: argparse.Namespace) -> ConfigAM:
         rebalanceo = replace(rebalanceo, banda_categoria=args.banda)
     backtest = replace(
         cfg.backtest,
-        ventana_estimacion=args.ventana_estimacion,
-        paso_rebalanceo=args.paso_rebalanceo,
+        ventana_estimacion_dias=args.ventana_estimacion,
+        paso_rebalanceo_dias=args.paso_rebalanceo,
         costo_bps=args.costo_bps,
     )
     if args.html:

@@ -31,6 +31,7 @@ from .ingestion import DatosFIC, id_fondo
 from .metrics import (
     beta_contra,
     max_drawdown,
+    observaciones_en,
     periodos_por_anio,
     ratio_calmar,
     ratio_sharpe,
@@ -218,7 +219,7 @@ def seleccionar_proxies(
         if not candidatos:
             return None
         elegido = vol[candidatos].idxmax()
-        log.info("Proxy seleccionado: %s -> %s", patron.pattern[:28], nombres.get(elegido))
+        log.debug("Proxy seleccionado: %s -> %s", patron.pattern[:28], nombres.get(elegido))
         return retornos[elegido]
 
     proxy_local = _elegir(re.compile(r"\b(COLCAP|ACCIONES COLOMBIA|RENTA VARIABLE COLOMBIA)\b"))
@@ -226,11 +227,50 @@ def seleccionar_proxies(
         proxy_local = _elegir(P_ACCIONES, excluir=P_INTERNACIONAL)
     proxy_intl = _elegir(re.compile(r"\b(DOLAR\w*|USD|ACCIONES GLOBAL\w*|GLOBAL\w*)\b"), excluir=P_LOCAL)
 
-    if proxy_local is None:
-        log.warning("Sin proxy de renta variable local: la capa cuantitativa usará solo volatilidad.")
-    if proxy_intl is None:
-        log.warning("Sin proxy internacional/FX: no se podrá separar RV_INTERNACIONAL por betas.")
     return proxy_local, proxy_intl
+
+
+def clasificar_fondos(
+    retornos: pd.DataFrame,
+    metadatos: pd.DataFrame,
+    proxies: tuple[pd.Series | None, pd.Series | None] | None = None,
+) -> pd.DataFrame:
+    """
+    Aplica las tres capas de clasificación sobre un panel de retornos.
+
+    Se separa del orquestador para que el backtest pueda reclasificar con la
+    información disponible en cada fecha: la volatilidad y las betas de la
+    muestra completa no se conocían en el pasado. Sin `proxies` se eligen
+    sobre el mismo panel.
+    """
+    ppa = periodos_por_anio(retornos.index)
+    vol = retornos.apply(lambda s: volatilidad_anualizada(s, ppa))
+    proxy_local, proxy_intl = proxies or seleccionar_proxies(retornos, metadatos)
+
+    filas: list[dict] = []
+    for fid in retornos.columns:
+        meta = metadatos.loc[fid]
+        b_loc, r2_loc = beta_contra(retornos[fid], proxy_local) if proxy_local is not None else (np.nan, np.nan)
+        b_int, r2_int = beta_contra(retornos[fid], proxy_intl) if proxy_intl is not None else (np.nan, np.nan)
+        regla = clasificar_por_reglas(meta["nombre_patrimonio"], meta["nombre_subtipo_patrimonio"])
+        modelo = clasificar_por_riesgo(vol[fid], b_loc, r2_loc, b_int, r2_int)
+        categoria, metodo, nota = _conciliar(regla, modelo, vol[fid])
+        filas.append(
+            {
+                "fondo_id": fid,
+                "categoria": categoria,
+                "categoria_regla": regla or "",
+                "categoria_modelo": modelo,
+                "metodo_clasificacion": metodo,
+                "observacion": nota,
+                "beta_rv_local": b_loc,
+                "r2_rv_local": r2_loc,
+                "beta_internacional": b_int,
+                "r2_internacional": r2_int,
+                "vol_anual": vol[fid],
+            }
+        )
+    return pd.DataFrame(filas).set_index("fondo_id")
 
 
 def clasificar_por_riesgo(
@@ -289,23 +329,25 @@ def calcular_rf_dinamica(
     precios: pd.DataFrame,
     categorias: pd.Series,
     aum: pd.Series | None = None,
-    ventana: int = 252,
+    ventana: int | None = None,
     fallback: float = 0.085,
 ) -> float:
     """
     Proxy de la tasa libre de riesgo: rendimiento anualizado compuesto de la
-    categoría RF_CORTO, ponderado por AUM y estimado sobre la ventana reciente.
+    categoría RF_CORTO, ponderado por AUM.
 
     Es la referencia natural para un inversionista colombiano: el costo de
     oportunidad real es el fondo de liquidez, no un bono teórico.
+
+    `ventana` (en observaciones) recorta a las últimas fechas; None usa todo el
+    panel, que es lo coherente cuando μ se estima sobre ese mismo panel.
     """
     ids = [c for c in precios.columns if categorias.get(c) == "RF_CORTO"]
     if not ids:
         log.warning("Sin fondos RF_CORTO; r_f = fallback %.2f%%", fallback * 100)
         return fallback
 
-    ventana_efectiva = min(int(ventana), len(precios))
-    tramo = precios[ids].tail(ventana_efectiva)
+    tramo = precios[ids] if ventana is None else precios[ids].tail(int(ventana))
     cagr = tramo.apply(retorno_anualizado).dropna()
     cagr = cagr[(cagr > -0.5) & (cagr < 1.0)]
     if cagr.empty:
@@ -348,49 +390,40 @@ def construir_universo(
     retornos = retornos_simples(precios)
     ppa = periodos_por_anio(precios.index)
 
-    # --- estadísticos base y factores -------------------------------------
-    vol = retornos.apply(lambda s: volatilidad_anualizada(s, ppa))
-    ret_anual = precios.apply(retorno_anualizado)
+    # --- clasificación y estadísticos base ----------------------------------
     proxy_local, proxy_intl = seleccionar_proxies(retornos, metadatos)
+    for proxy, etiqueta in ((proxy_local, "renta variable local"), (proxy_intl, "internacional/FX")):
+        if proxy is not None:
+            log.info("Proxy de %s: %s", etiqueta, metadatos.loc[proxy.name, "nombre_patrimonio"])
+    if proxy_local is None:
+        log.warning("Sin proxy de renta variable local: la capa cuantitativa usará solo volatilidad.")
+    if proxy_intl is None:
+        log.warning("Sin proxy internacional/FX: no se podrá separar RV_INTERNACIONAL por betas.")
 
-    filas: list[dict] = []
-    for fid in precios.columns:
-        meta = metadatos.loc[fid]
-        b_loc, r2_loc = beta_contra(retornos[fid], proxy_local) if proxy_local is not None else (np.nan, np.nan)
-        b_int, r2_int = beta_contra(retornos[fid], proxy_intl) if proxy_intl is not None else (np.nan, np.nan)
-        regla = clasificar_por_reglas(meta["nombre_patrimonio"], meta["nombre_subtipo_patrimonio"])
-        modelo = clasificar_por_riesgo(vol[fid], b_loc, r2_loc, b_int, r2_int)
-        categoria, metodo, nota = _conciliar(regla, modelo, vol[fid])
-        filas.append(
-            {
-                "fondo_id": fid,
-                "nombre_patrimonio": meta["nombre_patrimonio"],
-                "nombre_entidad": meta["nombre_entidad"],
-                "codigo_entidad": meta["codigo_entidad"],
-                "nombre_subtipo_patrimonio": meta["nombre_subtipo_patrimonio"],
-                "categoria": categoria,
-                "categoria_regla": regla or "",
-                "categoria_modelo": modelo,
-                "metodo_clasificacion": metodo,
-                "observacion": nota,
-                "aum_cop": meta["valor_fondo_cierre_dia_t"],
-                "beta_rv_local": b_loc,
-                "r2_rv_local": r2_loc,
-                "beta_internacional": b_int,
-                "r2_internacional": r2_int,
-                "retorno_anual": ret_anual[fid],
-                "vol_anual": vol[fid],
-                "max_drawdown": max_drawdown(precios[fid]),
-                "n_obs": int(precios[fid].notna().sum()),
-            }
-        )
-
-    fondos = pd.DataFrame(filas).set_index("fondo_id")
+    clasificacion = clasificar_fondos(retornos, metadatos, (proxy_local, proxy_intl))
+    fondos = pd.DataFrame(
+        {
+            "nombre_patrimonio": metadatos["nombre_patrimonio"],
+            "nombre_entidad": metadatos["nombre_entidad"],
+            "codigo_entidad": metadatos["codigo_entidad"],
+            "nombre_subtipo_patrimonio": metadatos["nombre_subtipo_patrimonio"],
+        }
+    )
+    fondos = fondos.join(clasificacion.drop(columns="vol_anual"))
+    fondos["aum_cop"] = metadatos["valor_fondo_cierre_dia_t"]
+    fondos["retorno_anual"] = precios.apply(retorno_anualizado)
+    fondos["vol_anual"] = clasificacion["vol_anual"]
+    fondos["max_drawdown"] = precios.apply(max_drawdown)
+    fondos["n_obs"] = precios.notna().sum().astype(int)
+    fondos.index.name = "fondo_id"
 
     # --- r_f dinámica y métricas ajustadas por riesgo ----------------------
     aum_ultimo = aum_panel.reindex(columns=precios.columns).ffill().iloc[-1] if not aum_panel.empty else None
+    ventana_rf = (
+        None if cfg_opt.ventana_rf_dias is None else observaciones_en(cfg_opt.ventana_rf_dias, ppa)
+    )
     rf = calcular_rf_dinamica(
-        precios, fondos["categoria"], aum_ultimo, cfg_opt.ventana_rf, cfg_opt.rf_fallback
+        precios, fondos["categoria"], aum_ultimo, ventana_rf, cfg_opt.rf_fallback
     )
     fondos["sharpe"] = [
         ratio_sharpe(fondos.loc[f, "retorno_anual"], fondos.loc[f, "vol_anual"], rf)

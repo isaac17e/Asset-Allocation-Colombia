@@ -83,6 +83,7 @@ def ejecutar(
             banda_categoria=res.perfil.banda_rebalanceo,
             banda_fondo=cfg.rebalanceo.banda_fondo,
             costo_bps=cfg.rebalanceo.costo_bps,
+            dias_deriva=cfg.rebalanceo.dias_deriva,
         )
 
     # 5 — Backtest walk-forward -------------------------------------------
@@ -186,6 +187,8 @@ def imprimir_resumen(resultado: ResultadoAMPM, cfg: ConfigAM) -> None:
 
     if resultado.backtest is not None:
         add("  BACKTEST WALK-FORWARD (neto de costos de transacción)")
+        add(f"  r_f realizada en el período: {resultado.backtest.rf_realizada:.2%} "
+            "(referencia del Sharpe realizado)")
         add("  " + "-" * 74)
         add(f"  {'Estrategia':<34}{'CAGR':>9}{'Vol':>9}{'Sharpe':>9}{'MaxDD':>9}")
         for estrategia, fila in resultado.backtest.metricas.iterrows():

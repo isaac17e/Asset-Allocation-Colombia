@@ -54,6 +54,12 @@ class RestriccionesPortafolio:
     cota_superior: np.ndarray
     grupos: tuple[GrupoRestriccion, ...] = field(default_factory=tuple)
     etiqueta: str = ""
+    #: Resultado memorizado del LP de viabilidad. Las restricciones no se
+    #: modifican tras construirse (relajar crea una instancia nueva), y el LP se
+    #: pide decenas de veces por optimización: semillas, proyecciones, limpieza.
+    _factible: tuple[np.ndarray | None] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     @property
     def n(self) -> int:
@@ -85,16 +91,27 @@ class RestriccionesPortafolio:
     def restricciones_scipy(self) -> list[dict]:
         """Restricciones en el formato de `scipy.optimize.minimize` (SLSQP)."""
         A_ub, b_ub = self.matrices_desigualdad()
-        cons: list[dict] = [{"type": "eq", "fun": lambda w: float(np.sum(w) - 1.0)}]
+        cons: list[dict] = [
+            {"type": "eq", "fun": lambda w: float(np.sum(w) - 1.0), "jac": np.ones_like}
+        ]
         if A_ub.shape[0]:
-            cons.append({"type": "ineq", "fun": lambda w, A=A_ub, b=b_ub: b - A @ w})
+            cons.append(
+                {"type": "ineq", "fun": lambda w, A=A_ub, b=b_ub: b - A @ w,
+                 "jac": lambda w, A=A_ub: -A}
+            )
         return cons
 
     # ------------------------------------------------------------------ #
     # Factibilidad y proyección
     # ------------------------------------------------------------------ #
     def punto_factible(self) -> np.ndarray | None:
-        """Halla un punto factible resolviendo un LP de viabilidad."""
+        """Halla un punto factible resolviendo un LP de viabilidad (memorizado)."""
+        if self._factible is None:
+            self._factible = (self._resolver_lp_factible(),)
+        punto = self._factible[0]
+        return None if punto is None else punto.copy()
+
+    def _resolver_lp_factible(self) -> np.ndarray | None:
         A_ub, b_ub = self.matrices_desigualdad()
         res = linprog(
             c=np.zeros(self.n),
@@ -242,12 +259,15 @@ def _max_sharpe_convexo(
          "jac": lambda z: np.concatenate([exceso, [0.0]])},
         {"type": "eq", "fun": lambda z: float(np.sum(z[:n]) - z[n]),
          "jac": lambda z: np.concatenate([np.ones(n), [-1.0]])},
-        {"type": "ineq", "fun": lambda z: cota_sup * z[n] - z[:n]},
-        {"type": "ineq", "fun": lambda z: z[:n] - cota_inf * z[n]},
+        {"type": "ineq", "fun": lambda z: cota_sup * z[n] - z[:n],
+         "jac": lambda z: np.column_stack([-np.eye(n), cota_sup])},
+        {"type": "ineq", "fun": lambda z: z[:n] - cota_inf * z[n],
+         "jac": lambda z: np.column_stack([np.eye(n), -cota_inf])},
     ]
     if A_ub.shape[0]:
         restricciones.append(
-            {"type": "ineq", "fun": lambda z: b_ub * z[n] - A_ub @ z[:n]}
+            {"type": "ineq", "fun": lambda z: b_ub * z[n] - A_ub @ z[:n],
+             "jac": lambda z: np.column_stack([-A_ub, b_ub])}
         )
 
     for x0 in semillas:
@@ -327,7 +347,14 @@ def optimizar_max_sharpe(
         vol = float(np.sqrt(max(w_ @ cov @ w_, 1e-18)))
         return -float((w_ @ exceso) / vol)
 
-    return _resolver_no_lineal(objetivo, restr, n_arranques, max_iter, semilla, "max_sharpe")
+    def gradiente(w_: np.ndarray) -> np.ndarray:
+        cov_w = cov @ w_
+        vol = float(np.sqrt(max(w_ @ cov_w, 1e-18)))
+        return -(exceso / vol - float(w_ @ exceso) * cov_w / vol ** 3)
+
+    return _resolver_no_lineal(
+        objetivo, restr, n_arranques, max_iter, semilla, "max_sharpe", gradiente
+    )
 
 
 def optimizar_risk_parity(
@@ -345,12 +372,25 @@ def optimizar_risk_parity(
         rc = contribuciones_riesgo(w, cov)
         return float(np.sum((rc - rc.mean()) ** 2)) * 1e4
 
-    return _resolver_no_lineal(objetivo, restr, n_arranques, max_iter, semilla, "risk_parity")
+    def gradiente(w: np.ndarray) -> np.ndarray:
+        # Con rc_i = w_i (Σw)_i / σ y c = rc - media(rc), como Σc = 0 el
+        # término de la media se anula y ∇f = 2·10⁴ · J'c, con
+        # J'c = [(Σw)∘c + Σ(w∘c)] / σ − (Σw) · ((w∘Σw)·c) / σ³.
+        cov_w = cov @ w
+        vol = float(np.sqrt(max(w @ cov_w, 1e-18)))
+        c = w * cov_w / vol
+        c = c - c.mean()
+        jt_c = (cov_w * c + cov @ (w * c)) / vol - cov_w * float((w * cov_w) @ c) / vol ** 3
+        return 2e4 * jt_c
+
+    return _resolver_no_lineal(
+        objetivo, restr, n_arranques, max_iter, semilla, "risk_parity", gradiente
+    )
 
 
 def _resolver_no_lineal(
     objetivo, restr: RestriccionesPortafolio, n_arranques: int, max_iter: int,
-    semilla: int, etiqueta: str,
+    semilla: int, etiqueta: str, gradiente=None,
 ) -> np.ndarray:
     """SLSQP con multi-arranque; se queda con el mejor óptimo factible."""
     mejor_w: np.ndarray | None = None
@@ -358,7 +398,7 @@ def _resolver_no_lineal(
     for x0 in _puntos_iniciales(restr, n_arranques, semilla):
         try:
             res = minimize(
-                objetivo, x0=x0, method="SLSQP", bounds=restr.bounds(),
+                objetivo, x0=x0, jac=gradiente, method="SLSQP", bounds=restr.bounds(),
                 constraints=restr.restricciones_scipy(),
                 options={"maxiter": max_iter, "ftol": 1e-10},
             )

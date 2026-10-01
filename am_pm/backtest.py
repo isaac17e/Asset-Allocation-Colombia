@@ -22,10 +22,17 @@ import numpy as np
 import pandas as pd
 
 from .config import ConfigBacktest, ConfigOptimizacion
-from .metrics import matriz_covarianza, periodos_por_anio, resumen_metricas, retornos_esperados, retornos_simples
+from .metrics import (
+    matriz_covarianza,
+    observaciones_en,
+    periodos_por_anio,
+    resumen_metricas,
+    retornos_esperados,
+    retornos_simples,
+)
 from .optimizers import limpiar_pesos, resolver
 from .profiles import PERFILES, construir_restricciones
-from .universe import UniversoCurado, calcular_rf_dinamica
+from .universe import UniversoCurado, calcular_rf_dinamica, clasificar_fondos
 from .allocation import aplicar_cardinalidad
 from .utils import get_logger
 
@@ -41,6 +48,8 @@ class ResultadoBacktest:
     equity: pd.DataFrame
     metricas: pd.DataFrame
     rebalanceos: pd.DataFrame
+    #: r_f realizada en el mismo período del backtest (referencia de Sharpe y Sortino).
+    rf_realizada: float = np.nan
     pesos_historicos: dict[str, pd.DataFrame] = field(default_factory=dict)
 
     @property
@@ -93,14 +102,23 @@ def ejecutar_backtest(
     nombres_perfil = perfiles or tuple(PERFILES)
 
     n_obs = len(precios)
-    if n_obs < cfg_bt.min_obs:
+    ppa_panel = periodos_por_anio(precios.index)
+    min_obs = observaciones_en(cfg_bt.min_dias, ppa_panel)
+    if n_obs < min_obs:
         raise ValueError(
-            f"Historia insuficiente para el backtest: {n_obs} obs (< {cfg_bt.min_obs})."
+            f"Historia insuficiente para el backtest: {n_obs} obs (< {min_obs})."
         )
 
-    puntos = list(range(cfg_bt.ventana_estimacion, n_obs - 1, cfg_bt.paso_rebalanceo))
-    log.info("Backtest: %d rebalanceos | ventana=%d obs | paso=%d obs | costo=%.0f bps",
-             len(puntos), cfg_bt.ventana_estimacion, cfg_bt.paso_rebalanceo, cfg_bt.costo_bps)
+    ventana_obs = observaciones_en(cfg_bt.ventana_estimacion_dias, ppa_panel)
+    paso_obs = observaciones_en(cfg_bt.paso_rebalanceo_dias, ppa_panel)
+    ventana_rf = (
+        None if cfg_opt.ventana_rf_dias is None
+        else observaciones_en(cfg_opt.ventana_rf_dias, ppa_panel)
+    )
+    puntos = list(range(ventana_obs, n_obs - 1, paso_obs))
+    log.info("Backtest: %d rebalanceos | ventana=%d días (%d obs) | paso=%d días (%d obs) | costo=%.0f bps",
+             len(puntos), cfg_bt.ventana_estimacion_dias, ventana_obs,
+             cfg_bt.paso_rebalanceo_dias, paso_obs, cfg_bt.costo_bps)
 
     claves = [_clave(p, m) for p in nombres_perfil for m in cfg_opt.metodos]
     valores: dict[str, list[pd.Series]] = {k: [] for k in claves}
@@ -112,7 +130,7 @@ def ejecutar_backtest(
     t0 = time.time()
     for i, t in enumerate(puntos):
         fin = puntos[i + 1] if i + 1 < len(puntos) else n_obs - 1
-        ventana = precios.iloc[t - cfg_bt.ventana_estimacion : t]
+        ventana = precios.iloc[t - ventana_obs : t]
         tramo = precios.iloc[t : fin + 1]
         fecha = precios.index[t]
 
@@ -122,23 +140,26 @@ def ejecutar_backtest(
             continue
 
         ventana_act = ventana[activos]
+        retornos_act = retornos_simples(ventana_act)
         ppa = periodos_por_anio(ventana_act.index)
-        mu = retornos_esperados(ventana_act, cfg_opt.shrinkage_mu)
-        cov = matriz_covarianza(retornos_simples(ventana_act), ppa, cfg_opt.shrinkage_cov)
+        # La clase de activo se reestima con la ventana: la que asigna el panel
+        # completo usa volatilidades y betas que en esa fecha no se conocían.
+        categorias_t = clasificar_fondos(retornos_act, universo.fondos.loc[activos])["categoria"]
+        n_reclasificados = int((categorias_t != categorias.reindex(activos)).sum())
+        mu = retornos_esperados(ventana_act, cfg_opt.shrinkage_mu, categorias_t)
+        cov = matriz_covarianza(retornos_act, ppa, cfg_opt.shrinkage_cov)
         rf_t = calcular_rf_dinamica(
-            ventana_act, categorias, None, cfg_opt.ventana_rf, cfg_opt.rf_fallback
+            ventana_act, categorias_t, None, ventana_rf, cfg_opt.rf_fallback
         )
 
         for nombre in nombres_perfil:
             perfil = PERFILES[nombre]
-            restr, _ = construir_restricciones(
-                perfil, categorias.reindex(activos), gestores.reindex(activos)
-            )
+            restr, _ = construir_restricciones(perfil, categorias_t, gestores.reindex(activos))
             for metodo in cfg_opt.metodos:
                 clave = _clave(nombre, metodo)
                 w = resolver(metodo, mu, cov, rf_t, restr, cfg_opt.n_arranques, cfg_opt.max_iter)
                 w = limpiar_pesos(w, restr, cfg_opt.peso_minimo_operativo)
-                w = aplicar_cardinalidad(w, perfil.max_fondos, restr)
+                w = aplicar_cardinalidad(w, perfil.max_fondos, restr, universo.fondos["aum_cop"])
 
                 anterior = pesos_previos.get(clave)
                 turnover = 1.0 if anterior is None else _turnover(anterior, w)
@@ -156,21 +177,31 @@ def ejecutar_backtest(
                         "fecha": fecha, "perfil": nombre, "metodo": metodo,
                         "turnover": turnover, "costo_pct": costo,
                         "n_posiciones": int((w > 1e-6).sum()), "rf_ventana": rf_t,
+                        "n_reclasificados": n_reclasificados,
                     }
                 )
-        log.info("Rebalanceo %d/%d — %s (%d fondos elegibles)",
-                 i + 1, len(puntos), fecha.date(), len(activos))
+        log.info("Rebalanceo %d/%d — %s (%d fondos elegibles, %d con otra clase que en el panel)",
+                 i + 1, len(puntos), fecha.date(), len(activos), n_reclasificados)
 
     equity = pd.DataFrame({k: pd.concat(v) for k, v in valores.items() if v}).sort_index()
     equity = equity[~equity.index.duplicated(keep="first")]
     equity = pd.concat([_benchmarks(precios, categorias, equity.index), equity], axis=1)
 
-    metricas = _metricas_equity(equity, universo.rf)
+    # El Sharpe realizado se mide contra la caja de ese mismo período, no contra
+    # la r_f del panel completo: en un ciclo de tasas, la r_f de otro período
+    # domina el exceso de retorno de los portafolios de baja volatilidad.
+    rf_realizada = calcular_rf_dinamica(
+        precios.reindex(equity.index), categorias, universo.fondos["aum_cop"],
+        None, universo.rf,
+    )
+    metricas = _metricas_equity(equity, rf_realizada)
     rebalanceos = pd.DataFrame(bitacora)
     pesos_hist = {k: pd.DataFrame(v).fillna(0.0) for k, v in historial_pesos.items() if v}
     log.info("Backtest completado en %.1fs | %d estrategias | %d fechas",
              time.time() - t0, equity.shape[1], equity.shape[0])
-    return ResultadoBacktest(equity, metricas, rebalanceos, pesos_hist)
+    return ResultadoBacktest(
+        equity, metricas, rebalanceos, rf_realizada=rf_realizada, pesos_historicos=pesos_hist
+    )
 
 
 def _turnover(anterior: pd.Series, nuevo: pd.Series) -> float:

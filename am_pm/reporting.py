@@ -333,7 +333,8 @@ def mostrar_tabla_comparativa(asignacion, backtest, separador: str = "::") -> pd
             "bt_sortino": "Sortino bt", "bt_mdd": "MaxDD bt",
             "bt_turnover": "Turnover", "bt_costo": "Costo acum",
         },
-        nota="Ex-ante: esperado por el optimizador. Bt: realizado walk-forward, neto de costos.",
+        nota=("Ex-ante: esperado por el optimizador, contra r_f del panel. "
+              "Bt: realizado walk-forward, neto de costos, contra r_f del período del backtest."),
     )
     return tabla
 
@@ -411,6 +412,8 @@ def mostrar_backtest(backtest, separador: str = "::") -> None:
             "pct_periodos_positivos": "% días +",
         },
         ancho_texto=38,
+        nota=(f"Sharpe y Sortino contra r_f realizada en el período del backtest = "
+              f"{backtest.rf_realizada:.2%} anual (RF_CORTO ponderada por AUM)."),
     )
     bitacora = backtest.rebalanceos.groupby(["perfil", "metodo"]).agg(
         rebalanceos=("turnover", "size"),

@@ -114,7 +114,8 @@ def _restringir_a(
 
 
 def _seleccion_cardinalidad(
-    pesos: pd.Series, restr: RestriccionesPortafolio, k: int
+    pesos: pd.Series, restr: RestriccionesPortafolio, k: int,
+    prioridad: pd.Series | None = None,
 ) -> set[str]:
     """
     Elige los `k` fondos a conservar.
@@ -123,8 +124,21 @@ def _seleccion_cardinalidad(
     de activo, el portafolio reducido no puede cumplir los mínimos del mandato.
     Por eso primero se reserva cupo para cada grupo con mínimo exigido y sólo
     después se completa por tamaño de posición.
+
+    Los empates de peso (frecuentes en 1/N y HRP proyectados, donde muchos
+    fondos quedan con el mismo peso) se rompen por `prioridad` —el AUM, que
+    favorece al fondo más líquido— y no por el ruido numérico del optimizador.
     """
-    orden = list(pesos.sort_values(ascending=False).index)
+    criterio = pd.DataFrame(
+        {
+            "peso": pesos.round(6),
+            "prioridad": (prioridad.reindex(pesos.index) if prioridad is not None
+                          else pd.Series(0.0, index=pesos.index)).fillna(0.0),
+        }
+    )
+    orden = list(
+        criterio.sort_values(["peso", "prioridad"], ascending=False, kind="mergesort").index
+    )
     seleccion: list[str] = []
 
     for g in restr.grupos:
@@ -144,7 +158,8 @@ def _seleccion_cardinalidad(
 
 
 def aplicar_cardinalidad(
-    pesos: pd.Series, max_fondos: int, restr: RestriccionesPortafolio
+    pesos: pd.Series, max_fondos: int, restr: RestriccionesPortafolio,
+    prioridad: pd.Series | None = None,
 ) -> pd.Series:
     """
     Limita el número de posiciones del portafolio.
@@ -161,7 +176,7 @@ def aplicar_cardinalidad(
         return pesos
 
     for k in range(max_fondos, min(activas, restr.n) + 1):
-        conservar = _seleccion_cardinalidad(pesos, restr, k)
+        conservar = _seleccion_cardinalidad(pesos, restr, k, prioridad)
         restr_reducida = _restringir_a(restr, conservar)
         if restr_reducida.punto_factible() is None:
             continue
@@ -197,7 +212,7 @@ def optimizar_perfil(
     for metodo in cfg.metodos:
         w = resolver(metodo, mu, cov, universo.rf, restr, cfg.n_arranques, cfg.max_iter)
         w = limpiar_pesos(w, restr, cfg.peso_minimo_operativo)
-        w = aplicar_cardinalidad(w, perfil.max_fondos, restr)
+        w = aplicar_cardinalidad(w, perfil.max_fondos, restr, universo.fondos["aum_cop"])
         violaciones = restr.violaciones(w.to_numpy(dtype=float), tol=1e-4)
         if violaciones:
             log.warning("[%s/%s] Restricciones con holgura numérica: %s",
@@ -232,7 +247,7 @@ def construir_portafolios(
 ) -> ResultadoAsignacion:
     """Genera los portafolios modelo de todos los perfiles solicitados."""
     ppa = periodos_por_anio(universo.precios.index)
-    mu = retornos_esperados(universo.precios, cfg.shrinkage_mu)
+    mu = retornos_esperados(universo.precios, cfg.shrinkage_mu, universo.mapa_categoria())
     cov = matriz_covarianza(universo.retornos, ppa, cfg.shrinkage_cov)
     activos = [a for a in universo.precios.columns if a in mu.index and a in cov.index]
     mu, cov = mu.reindex(activos), cov.reindex(index=activos, columns=activos)

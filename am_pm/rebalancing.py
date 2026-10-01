@@ -167,15 +167,16 @@ def resumen_rebalanceo(ordenes: pd.DataFrame, patrimonio: float) -> dict[str, fl
 def informe_tactico(
     pesos_objetivo: pd.Series, precios: pd.DataFrame, categorias: pd.Series,
     patrimonio: float, banda_categoria: float = 0.05, banda_fondo: float = 0.03,
-    costo_bps: float = 25.0, dias_deriva: int = 63,
+    costo_bps: float = 25.0, dias_deriva: int = 91,
 ) -> dict[str, pd.DataFrame | dict]:
     """
     Informe completo de rebalanceo táctico.
 
     Simula la deriva del portafolio modelo durante los últimos `dias_deriva`
-    períodos y evalúa las bandas contra los pesos objetivo vigentes.
+    días calendario y evalúa las bandas contra los pesos objetivo vigentes.
     """
-    desde = precios.index[max(0, len(precios) - dias_deriva)]
+    inicio = precios.index[-1] - pd.Timedelta(days=dias_deriva)
+    desde = precios.index[precios.index >= inicio][0]
     actuales = derivar_pesos(pesos_objetivo, precios, desde)
     bandas_cat = evaluar_bandas(actuales, pesos_objetivo, categorias, banda_categoria)
     bandas_fondo = evaluar_bandas_fondo(actuales, pesos_objetivo, banda_fondo)

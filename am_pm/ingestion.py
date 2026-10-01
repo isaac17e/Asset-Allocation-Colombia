@@ -8,8 +8,8 @@ Estrategia en dos etapas para no descargar el dataset completo (≈3M de filas):
   2. *Historia*: se descargan las series diarias sólo de los pares
      (código de negocio, tipo de participación) seleccionados, paginando.
 
-Si la API no está disponible, `cargar_datos` degrada a un generador sintético
-reproducible para que el resto del pipeline sea ejecutable y testeable.
+Si la API no está disponible, `cargar_datos` detiene la corrida; sólo degrada
+al generador sintético reproducible si `respaldo_sintetico` está activo.
 """
 
 from __future__ import annotations
@@ -280,7 +280,8 @@ def cargar_datos(cfg: ConfigDatos, *, offline: bool = False, semilla: int = 42) 
     Punto de entrada de la capa de datos.
 
     Devuelve el corte transversal y el panel histórico de los fondos elegibles,
-    resolviendo cache en disco y degradando a datos sintéticos si la API falla.
+    resolviendo cache en disco. Si la API falla, la corrida se detiene salvo
+    que `cfg.respaldo_sintetico` autorice continuar con datos sintéticos.
     """
     if offline:
         log.warning("Modo offline: se generan datos sintéticos reproducibles.")
@@ -321,6 +322,11 @@ def cargar_datos(cfg: ConfigDatos, *, offline: bool = False, semilla: int = 42) 
 
     except Exception as exc:  # noqa: BLE001
         log.error("Extracción desde datos.gov.co fallida (%s).", exc)
+        if not cfg.respaldo_sintetico:
+            raise ConnectionError(
+                "No se pudieron obtener datos de mercado. Reintente más tarde, use "
+                "--app-token, o --respaldo-sintetico para continuar con datos simulados."
+            ) from exc
         log.warning("Se continúa con datos sintéticos: los resultados NO son de mercado.")
         return generar_datos_sinteticos(cfg, semilla)
 
