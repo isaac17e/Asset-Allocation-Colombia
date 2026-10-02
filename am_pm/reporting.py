@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from .charts import (
+    COLOR_CATEGORIA,
     CSS_INTERACCION,
     ETIQUETA_CATEGORIA,
     ETIQUETA_METODO,
@@ -26,6 +27,7 @@ from .charts import (
     TINTA_SECUNDARIA,
     TINTA_TENUE,
     Grafico,
+    esc,
     grafico_composicion,
     grafico_equity,
     grafico_universo,
@@ -515,6 +517,49 @@ _PLANTILLA_HTML = """<!doctype html>
     border-radius: 12px; padding: 18px; overflow-x: auto;
   }}
   svg.grafico {{ width: 100%; height: auto; display: block; min-width: 860px; }}
+  .perfiles {{
+    display: grid; gap: 16px;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+  }}
+  .perfil {{
+    background: var(--tarjeta); border: 1px solid var(--borde);
+    border-radius: 12px; padding: 18px 18px 10px;
+  }}
+  .perfil h3 {{ font-size: 16px; margin: 0 0 2px; font-weight: 640; }}
+  .perfil .desc {{ color: var(--tinta-3); font-size: 12.5px; margin: 0 0 12px; }}
+  .pestanas {{ display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }}
+  .pestanas button {{
+    font: inherit; font-size: 12.5px; padding: 4px 11px; cursor: pointer;
+    border: 1px solid var(--borde); border-radius: 999px;
+    background: transparent; color: var(--tinta-2);
+  }}
+  .pestanas button[aria-selected="true"] {{
+    background: var(--tinta); border-color: var(--tinta); color: #fff;
+  }}
+  .resumen-metodo {{ color: var(--tinta-2); font-size: 12.5px; margin: 0 0 6px; }}
+  ol.posiciones {{ list-style: none; margin: 0; padding: 0; }}
+  ol.posiciones li {{
+    display: grid; grid-template-columns: 22px 1fr auto; gap: 2px 10px;
+    padding: 8px 0; border-top: 1px solid var(--borde); align-items: baseline;
+  }}
+  ol.posiciones .rank {{ color: var(--tinta-3); font-size: 12px; font-variant-numeric: tabular-nums; }}
+  ol.posiciones .fondo {{ font-size: 13.5px; font-weight: 560; overflow-wrap: anywhere; }}
+  ol.posiciones .meta {{ grid-column: 2; color: var(--tinta-3); font-size: 12px; }}
+  ol.posiciones .punto {{
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px;
+  }}
+  ol.posiciones .peso {{
+    grid-row: 1; grid-column: 3; font-size: 14px; font-weight: 620;
+    font-variant-numeric: tabular-nums; text-align: right;
+  }}
+  ol.posiciones .barra {{
+    grid-column: 2 / 4; height: 4px; border-radius: 2px; background: var(--borde);
+  }}
+  ol.posiciones .barra span {{ display: block; height: 100%; border-radius: 2px; }}
+  .total {{
+    display: flex; justify-content: space-between; padding: 9px 0 6px;
+    border-top: 1px solid var(--tinta-3); font-size: 13px; font-weight: 600;
+  }}
   footer {{
     margin-top: 52px; padding-top: 18px; border-top: 1px solid var(--borde);
     color: var(--tinta-3); font-size: 12.5px;
@@ -540,13 +585,26 @@ _PLANTILLA_HTML = """<!doctype html>
   <footer>{pie}</footer>
 </div>
 <script>{js_interaccion}</script>
+<script>
+document.querySelectorAll('.perfil').forEach(function (tarjeta) {{
+  var botones = tarjeta.querySelectorAll('.pestanas button');
+  botones.forEach(function (boton) {{
+    boton.addEventListener('click', function () {{
+      botones.forEach(function (b) {{ b.setAttribute('aria-selected', String(b === boton)); }});
+      tarjeta.querySelectorAll('.panel-metodo').forEach(function (panel) {{
+        panel.hidden = panel.dataset.metodo !== boton.dataset.metodo;
+      }});
+    }});
+  }});
+}});
+</script>
 </body>
 </html>
 """
 
 
 def construir_informe_html(
-    secciones: list[tuple[str, str, str, Grafico]],
+    secciones: list[tuple[str, str, str, Grafico | str]],
     tarjetas: list[tuple[str, str]],
     ruta: Path,
     titulo: str = "AM-PM · Asset Allocation Manager",
@@ -559,7 +617,8 @@ def construir_informe_html(
 
     `secciones` es una lista de (ancla, título, descripción, gráfico). Cada
     gráfico aporta su SVG y una carga útil JSON que la capa de interacción lee
-    para construir los tooltips. El resultado no depende de red ni de librerías
+    para construir los tooltips; si en lugar de un gráfico llega un texto, se
+    incrusta tal cual como HTML (p. ej. las listas de pesos por perfil). El resultado no depende de red ni de librerías
     externas: se abre con doble clic.
     """
     bloques_tarjetas = "".join(
@@ -572,10 +631,13 @@ def construir_informe_html(
         f'<section class="grafica" id="{ancla}">'
         f"<h2>{titulo_seccion}</h2>"
         f'<p class="nota">{nota}</p>'
-        f'<div class="lienzo">{grafico.svg}</div>'
-        f'<script type="application/json" id="datos-{grafico.id}">{grafico.json_datos()}</script>'
-        f"</section>"
-        for ancla, titulo_seccion, nota, grafico in secciones
+        + (
+            contenido if isinstance(contenido, str) else
+            f'<div class="lienzo">{contenido.svg}</div>'
+            f'<script type="application/json" id="datos-{contenido.id}">{contenido.json_datos()}</script>'
+        )
+        + "</section>"
+        for ancla, titulo_seccion, nota, contenido in secciones
     )
     html = _PLANTILLA_HTML.format(
         titulo=titulo,
@@ -599,12 +661,69 @@ def construir_informe_html(
     return ruta
 
 
+def html_pesos_por_perfil(asignacion, fondos: pd.DataFrame) -> str:
+    """
+    Lista de posiciones de cada perfil con su ponderación, una pestaña por
+    método. Abre en Markowitz, el portafolio de referencia operativo.
+    """
+    tarjetas = []
+    for perfil in _orden_perfiles(asignacion.perfiles):
+        res = asignacion.perfiles[perfil]
+        metodos = list(res.pesos.columns)
+        inicial = "MARKOWITZ_SHARPE" if "MARKOWITZ_SHARPE" in metodos else metodos[0]
+        botones, paneles = [], []
+        for metodo in metodos:
+            etiqueta = esc(ETIQUETA_METODO.get(metodo, metodo))
+            activo = metodo == inicial
+            botones.append(
+                f'<button type="button" role="tab" data-metodo="{esc(metodo)}" '
+                f'aria-selected="{str(activo).lower()}">{etiqueta}</button>'
+            )
+            serie = res.pesos[metodo]
+            posiciones = serie[serie > 1e-6].sort_values(ascending=False)
+            maximo = float(posiciones.max()) if not posiciones.empty else 1.0
+            items = []
+            for k, (fid, peso) in enumerate(posiciones.items(), start=1):
+                fila = fondos.loc[fid]
+                color = COLOR_CATEGORIA.get(fila["categoria"], TINTA_TENUE)
+                items.append(
+                    f'<li><span class="rank">{k}</span>'
+                    f'<span class="fondo">{esc(fila["nombre_patrimonio"])}</span>'
+                    f'<span class="peso">{peso:.1%}</span>'
+                    f'<span class="meta"><span class="punto" style="background:{color}"></span>'
+                    f'{esc(ETIQUETA_CATEGORIA.get(fila["categoria"], fila["categoria"]))} · '
+                    f'{esc(fila["nombre_entidad"])}</span>'
+                    f'<span class="barra"><span style="width:{peso / maximo:.1%};'
+                    f'background:{color}"></span></span></li>'
+                )
+            stats = res.estadisticas.loc[metodo] if metodo in res.estadisticas.index else None
+            resumen = (
+                f'<p class="resumen-metodo">Retorno esperado {stats["retorno_esperado"]:.1%} · '
+                f'Vol {stats["vol_esperada"]:.1%} · Sharpe {stats["sharpe_ex_ante"]:.2f}</p>'
+                if stats is not None else ""
+            )
+            paneles.append(
+                f'<div class="panel-metodo" data-metodo="{esc(metodo)}"'
+                f'{"" if activo else " hidden"}>{resumen}'
+                f'<ol class="posiciones">{"".join(items)}</ol>'
+                f'<div class="total"><span>Total · {len(posiciones)} fondos</span>'
+                f"<span>{posiciones.sum():.1%}</span></div></div>"
+            )
+        tarjetas.append(
+            f'<div class="perfil"><h3>{esc(perfil.title())}</h3>'
+            f'<p class="desc">{esc(res.perfil.descripcion)}</p>'
+            f'<div class="pestanas" role="tablist">{"".join(botones)}</div>'
+            f'{"".join(paneles)}</div>'
+        )
+    return f'<div class="perfiles">{"".join(tarjetas)}</div>'
+
+
 def generar_informe(
     universo, asignacion, backtest, ruta: Path, fecha_generacion: datetime | None = None
 ) -> Path:
     """Arma el informe HTML completo a partir de los resultados de la corrida."""
     fecha_generacion = fecha_generacion or datetime.now()
-    secciones: list[tuple[str, str, str, Grafico]] = [
+    secciones: list[tuple[str, str, str, Grafico | str]] = [
         (
             "universo",
             "Universo curado: riesgo y retorno por clase de activo",
@@ -622,6 +741,14 @@ def generar_informe(
             "mandato de cada perfil. La escalera de riesgo debe leerse de izquierda a derecha. "
             "<strong>Pasa el cursor por un segmento</strong> para ver su peso exacto.",
             grafico_composicion({p: r.composicion for p, r in asignacion.perfiles.items()}),
+        ),
+        (
+            "portafolios",
+            "Portafolios por perfil: fondos y ponderación",
+            "Posiciones de cada portafolio modelo, ordenadas de mayor a menor peso. "
+            "Abre en Markowitz (máximo Sharpe), el portafolio de referencia operativo; "
+            "<strong>cambia de método con las pestañas</strong> de cada perfil.",
+            html_pesos_por_perfil(asignacion, universo.fondos),
         ),
     ]
     if backtest is not None and not backtest.equity.empty:
