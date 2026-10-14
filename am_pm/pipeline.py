@@ -11,8 +11,6 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import pandas as pd
-
 from .allocation import ResultadoAsignacion, construir_portafolios
 from .backtest import ResultadoBacktest, ejecutar_backtest
 from .config import CATEGORIAS, ConfigAM
@@ -21,6 +19,8 @@ from .profiles import PERFILES
 from .rebalancing import informe_tactico
 from .reporting import (
     generar_informe,
+    imprimir_tabla,
+    imprimir_titulo,
     mostrar_backtest,
     mostrar_composicion,
     mostrar_pesos,
@@ -137,73 +137,65 @@ def _publicar_resultados(
 def imprimir_resumen(resultado: ResultadoAMPM, cfg: ConfigAM) -> None:
     """Informe de comité: qué se construyó, con qué datos y qué resultó."""
     u = resultado.universo
-    lineas: list[str] = []
-    add = lineas.append
+    imprimir_titulo("AM-PM · Resumen ejecutivo de asignación")
+    print(f"  Fecha de corte     : {u.fecha_corte.date()}")
+    print(f"  Origen de datos    : {u.origen}"
+          + ("   *** DATOS SIMULADOS: NO USAR PARA DECISIONES ***" if u.origen == "SINTETICO" else ""))
+    print(f"  Universo curado    : {len(u.fondos)} fondos | {u.precios.shape[0]} observaciones")
+    print(f"  Ventana histórica  : {u.precios.index[0].date()} a {u.precios.index[-1].date()}")
+    print(f"  Tasa libre riesgo  : {u.rf:.2%} anual (proxy compuesto RF_CORTO)")
+    print(f"  Patrimonio mandato : {formato_cop(cfg.patrimonio_cop)}")
 
-    add("")
-    add("=" * 78)
-    add("  AM-PM · RESUMEN EJECUTIVO DE ASIGNACIÓN")
-    add("=" * 78)
-    add(f"  Fecha de corte     : {u.fecha_corte.date()}")
-    add(f"  Origen de datos    : {u.origen}"
-        + ("   *** DATOS SIMULADOS: NO USAR PARA DECISIONES ***" if u.origen == "SINTETICO" else ""))
-    add(f"  Universo curado    : {len(u.fondos)} fondos | {u.precios.shape[0]} observaciones")
-    add(f"  Ventana histórica  : {u.precios.index[0].date()} a {u.precios.index[-1].date()}")
-    add(f"  Tasa libre riesgo  : {u.rf:.2%} anual (proxy compuesto RF_CORTO)")
-    add(f"  Patrimonio mandato : {formato_cop(cfg.patrimonio_cop)}")
-    add("")
-
-    add("  UNIVERSO POR CLASE DE ACTIVO")
-    add("  " + "-" * 74)
     resumen_cat = u.fondos.groupby("categoria", observed=True).agg(
         fondos=("aum_cop", "size"), aum_bn=("aum_cop", lambda s: s.sum() / 1e12),
         ret=("retorno_anual", "median"), vol=("vol_anual", "median"), sharpe=("sharpe", "median"),
     ).reindex(CATEGORIAS).dropna(how="all")
-    add(f"  {'Categoría':<20}{'Fondos':>8}{'AUM (bn COP)':>15}{'Ret med':>10}{'Vol med':>10}{'Sharpe':>9}")
-    for cat, fila in resumen_cat.iterrows():
-        add(f"  {cat:<20}{int(fila['fondos']):>8}{fila['aum_bn']:>15.1f}"
-            f"{fila['ret']:>9.1%}{fila['vol']:>10.1%}{fila['sharpe']:>9.2f}")
-    add("")
+    imprimir_tabla(
+        resumen_cat.reset_index(),
+        titulo="Universo por clase de activo",
+        formatos={"fondos": "int", "aum_bn": "num", "ret": "pct", "vol": "pct", "sharpe": "num"},
+        encabezados={"categoria": "Categoría", "fondos": "Fondos", "aum_bn": "AUM (bn COP)",
+                     "ret": "Ret med", "vol": "Vol med", "sharpe": "Sharpe"},
+    )
 
     for nombre, res in resultado.asignacion.perfiles.items():
-        add(f"  PERFIL {nombre} — {res.perfil.descripcion}")
-        add("  " + "-" * 74)
-        add(f"  {'Método':<16}{'Ret esp':>9}{'Vol esp':>9}{'Sharpe':>9}{'RV':>8}{'Pos':>6}{'DivRatio':>10}")
-        for metodo, fila in res.estadisticas.iterrows():
-            add(f"  {metodo:<16}{fila['retorno_esperado']:>8.1%}{fila['vol_esperada']:>9.1%}"
-                f"{fila['sharpe_ex_ante']:>9.2f}{fila['peso_RENTA_VARIABLE']:>8.0%}"
-                f"{int(fila['n_posiciones']):>6}{fila['ratio_diversificacion']:>10.2f}")
-        alertas = resultado.rebalanceo[nombre]["bandas_categoria"]
-        n_alertas = int((alertas["estado"] == "ALERTA").sum())
-        turnover = resultado.rebalanceo[nombre]["resumen"]["turnover"]
-        add(f"  Bandas ±{res.perfil.banda_rebalanceo:.0%}: {n_alertas} alerta(s) | "
-            f"turnover requerido {turnover:.1%} | "
-            f"costo {formato_cop(resultado.rebalanceo[nombre]['resumen']['costo_cop'])}")
+        rebalanceo = resultado.rebalanceo[nombre]
+        n_alertas = int((rebalanceo["bandas_categoria"]["estado"] == "ALERTA").sum())
+        imprimir_tabla(
+            res.estadisticas.rename_axis("metodo").reset_index()[
+                ["metodo", "retorno_esperado", "vol_esperada", "sharpe_ex_ante",
+                 "peso_RENTA_VARIABLE", "n_posiciones", "ratio_diversificacion"]
+            ],
+            titulo=f"PERFIL {nombre} — {res.perfil.descripcion}",
+            formatos={"retorno_esperado": "pct", "vol_esperada": "pct", "sharpe_ex_ante": "num",
+                      "peso_RENTA_VARIABLE": "pct", "n_posiciones": "int",
+                      "ratio_diversificacion": "num"},
+            encabezados={"metodo": "Método", "retorno_esperado": "Ret esp", "vol_esperada": "Vol esp",
+                         "sharpe_ex_ante": "Sharpe", "peso_RENTA_VARIABLE": "RV",
+                         "n_posiciones": "Pos", "ratio_diversificacion": "DivRatio"},
+            nota=(f"Bandas ±{res.perfil.banda_rebalanceo:.0%}: {n_alertas} alerta(s) | "
+                  f"turnover requerido {rebalanceo['resumen']['turnover']:.1%} | "
+                  f"costo {formato_cop(rebalanceo['resumen']['costo_cop'])}"),
+        )
         if res.notas:
-            add(f"  Relajaciones de mandato: {len(res.notas)}")
+            print(f"  Relajaciones de mandato: {len(res.notas)}")
             for nota in res.notas:
-                add(f"    · {nota}")
-        add("")
+                print(f"    · {nota}")
 
     if resultado.backtest is not None:
-        add("  BACKTEST WALK-FORWARD (neto de costos de transacción)")
-        add(f"  r_f realizada en el período: {resultado.backtest.rf_realizada:.2%} "
-            "(referencia del Sharpe realizado)")
-        add("  " + "-" * 74)
-        add(f"  {'Estrategia':<34}{'CAGR':>9}{'Vol':>9}{'Sharpe':>9}{'MaxDD':>9}")
-        for estrategia, fila in resultado.backtest.metricas.iterrows():
-            add(f"  {estrategia:<34}{fila['retorno_anual']:>8.1%}{fila['vol_anual']:>9.1%}"
-                f"{fila['sharpe']:>9.2f}{fila['max_drawdown']:>9.1%}")
-        add("")
+        imprimir_tabla(
+            resultado.backtest.metricas[["retorno_anual", "vol_anual", "sharpe", "max_drawdown"]]
+            .reset_index(),
+            titulo="BACKTEST WALK-FORWARD (neto de costos de transacción)",
+            formatos={"retorno_anual": "pct", "vol_anual": "pct", "sharpe": "num", "max_drawdown": "pct"},
+            encabezados={"estrategia": "Estrategia", "retorno_anual": "CAGR", "vol_anual": "Vol",
+                         "sharpe": "Sharpe", "max_drawdown": "MaxDD"},
+            nota=(f"r_f realizada en el período: {resultado.backtest.rf_realizada:.2%} "
+                  "(referencia del Sharpe realizado)"),
+        )
 
-    if resultado.artefactos:
-        add("  INFORME GRÁFICO")
-        add("  " + "-" * 74)
-        for ruta in resultado.artefactos.values():
-            add(f"  · {ruta}")
-            add(f"    Abrir con:  open '{ruta}'")
-        add("")
-    add(f"  Corrida completada en {resultado.duracion_seg:.1f}s")
-    add("=" * 78)
-
-    print("\n".join(lineas))
+    for ruta in resultado.artefactos.values():
+        imprimir_titulo("Informe gráfico", nivel=2)
+        print(f"  · {ruta}")
+        print(f"    Abrir con:  open '{ruta}'")
+    print(f"\n  Corrida completada en {resultado.duracion_seg:.1f}s")

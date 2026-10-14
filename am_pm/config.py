@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # --------------------------------------------------------------------------- #
@@ -114,7 +114,7 @@ class ConfigOptimizacion:
     """Parámetros del motor de optimización."""
 
     metodos: tuple[str, ...] = METODOS
-    #: Intensidad de shrinkage de la matriz de covarianza (None = Ledoit-Wolf).
+    #: Intensidad de shrinkage de la matriz de correlación (None = estimada por Ledoit-Wolf).
     shrinkage_cov: float | None = None
     #: Peso de la media histórica frente a la media de su clase de activo (James-Stein).
     shrinkage_mu: float = 0.60
@@ -179,6 +179,3 @@ class ConfigAM:
     patrimonio_cop: float = 1_000_000_000.0
     semilla: int = 42
     modo_offline: bool = False
-
-    def con_outdir(self, ruta: str | Path) -> "ConfigAM":
-        return replace(self, outdir=Path(ruta))

@@ -31,9 +31,9 @@ from .charts import (
     grafico_composicion,
     grafico_equity,
     grafico_universo,
+    orden_perfiles,
 )
 from .config import CATEGORIAS, CATEGORIAS_RV
-from .config import PERFILES as ORDEN_PERFILES
 from .utils import get_logger
 
 log = get_logger("am_pm.reporting")
@@ -231,24 +231,18 @@ def mostrar_politica(perfiles: dict) -> None:
 def mostrar_pesos(asignacion, fondos: pd.DataFrame, max_filas: int | None = None) -> None:
     """Portafolios modelo: posiciones de cada perfil y método."""
     imprimir_titulo("Portafolios modelo · pesos por fondo")
-    for perfil in _orden_perfiles(asignacion.perfiles):
+    for perfil in orden_perfiles(asignacion.perfiles):
         resultado = asignacion.perfiles[perfil]
         for metodo in resultado.pesos.columns:
             serie = resultado.pesos[metodo]
             posiciones = serie[serie > 1e-6].sort_values(ascending=False)
             if posiciones.empty:
                 continue
-            tabla = pd.DataFrame(
-                {
-                    "fondo_id": posiciones.index,
-                    "nombre_patrimonio": fondos.loc[posiciones.index, "nombre_patrimonio"].to_numpy(),
-                    "nombre_entidad": fondos.loc[posiciones.index, "nombre_entidad"].to_numpy(),
-                    "categoria": fondos.loc[posiciones.index, "categoria"].to_numpy(),
-                    "peso": posiciones.to_numpy(),
-                    "retorno_anual": fondos.loc[posiciones.index, "retorno_anual"].to_numpy(),
-                    "vol_anual": fondos.loc[posiciones.index, "vol_anual"].to_numpy(),
-                    "sharpe": fondos.loc[posiciones.index, "sharpe"].to_numpy(),
-                }
+            tabla = (
+                fondos.loc[posiciones.index].assign(peso=posiciones)
+                .rename_axis("fondo_id").reset_index()
+                [["fondo_id", "nombre_patrimonio", "nombre_entidad", "categoria", "peso",
+                  "retorno_anual", "vol_anual", "sharpe"]]
             )
             imprimir_tabla(
                 tabla,
@@ -268,7 +262,7 @@ def mostrar_pesos(asignacion, fondos: pd.DataFrame, max_filas: int | None = None
 def mostrar_composicion(asignacion) -> None:
     """Asignación agregada por clase de activo."""
     imprimir_titulo("Composición por clase de activo")
-    for perfil in _orden_perfiles(asignacion.perfiles):
+    for perfil in orden_perfiles(asignacion.perfiles):
         comp = asignacion.perfiles[perfil].composicion.reindex(CATEGORIAS).fillna(0.0)
         tabla = comp.reset_index()
         tabla["categoria"] = tabla["categoria"].map(ETIQUETA_CATEGORIA)
@@ -287,14 +281,14 @@ def mostrar_tabla_comparativa(asignacion, backtest, separador: str = "::") -> pd
     """Cruce de métricas esperadas (ex-ante) y realizadas (backtest)."""
     imprimir_titulo("Tabla comparativa · esperado vs. realizado")
     filas = []
-    for perfil in _orden_perfiles(asignacion.perfiles):
+    for perfil in orden_perfiles(asignacion.perfiles):
         resultado = asignacion.perfiles[perfil]
         for metodo, stats in resultado.estadisticas.iterrows():
             filas.append(
                 {
                     "perfil": perfil,
                     "metodo": ETIQUETA_METODO.get(metodo, metodo),
-                    "_clave": f"{perfil}{separador}{metodo}",
+                    "_metodo": metodo,
                     "ex_ret": stats["retorno_esperado"],
                     "ex_vol": stats["vol_esperada"],
                     "ex_sharpe": stats["sharpe_ex_ante"],
@@ -307,20 +301,19 @@ def mostrar_tabla_comparativa(asignacion, backtest, separador: str = "::") -> pd
     tabla = pd.DataFrame(filas)
 
     if backtest is not None and not backtest.metricas.empty:
-        met = backtest.metricas
-        tabla["bt_ret"] = tabla["_clave"].map(met["retorno_anual"])
-        tabla["bt_vol"] = tabla["_clave"].map(met["vol_anual"])
-        tabla["bt_sharpe"] = tabla["_clave"].map(met["sharpe"])
-        tabla["bt_sortino"] = tabla["_clave"].map(met["sortino"])
-        tabla["bt_mdd"] = tabla["_clave"].map(met["max_drawdown"])
-        rot = backtest.rebalanceos.groupby(["perfil", "metodo"])["turnover"].mean()
-        costo = backtest.rebalanceos.groupby(["perfil", "metodo"])["costo_pct"].sum()
-        claves = list(zip(tabla["perfil"], [m for m in _metodos_originales(asignacion)]))
-        tabla["bt_turnover"] = [rot.get(k, np.nan) for k in claves]
-        tabla["bt_costo"] = [costo.get(k, np.nan) for k in claves]
+        clave = tabla["perfil"] + separador + tabla["_metodo"]
+        for columna, metrica in (
+            ("bt_ret", "retorno_anual"), ("bt_vol", "vol_anual"), ("bt_sharpe", "sharpe"),
+            ("bt_sortino", "sortino"), ("bt_mdd", "max_drawdown"),
+        ):
+            tabla[columna] = clave.map(backtest.metricas[metrica])
+        por_estrategia = backtest.rebalanceos.groupby(["perfil", "metodo"])
+        llaves = pd.MultiIndex.from_frame(tabla[["perfil", "_metodo"]])
+        tabla["bt_turnover"] = por_estrategia["turnover"].mean().reindex(llaves).to_numpy()
+        tabla["bt_costo"] = por_estrategia["costo_pct"].sum().reindex(llaves).to_numpy()
 
     imprimir_tabla(
-        tabla.drop(columns=["_clave"]),
+        tabla.drop(columns=["_metodo"]),
         formatos={
             "ex_ret": "pct", "ex_vol": "pct", "ex_sharpe": "num", "rv": "pct",
             "riesgo_rv": "pct", "n_pos": "int", "div": "num", "bt_ret": "pct",
@@ -339,14 +332,6 @@ def mostrar_tabla_comparativa(asignacion, backtest, separador: str = "::") -> pd
               "Bt: realizado walk-forward, neto de costos, contra r_f del período del backtest."),
     )
     return tabla
-
-
-def _metodos_originales(asignacion) -> list[str]:
-    """Claves internas de método, en el mismo orden que la tabla comparativa."""
-    salida: list[str] = []
-    for perfil in _orden_perfiles(asignacion.perfiles):
-        salida.extend(list(asignacion.perfiles[perfil].estadisticas.index))
-    return salida
 
 
 def mostrar_rebalanceo(informes: dict[str, dict], patrimonio: float) -> None:
@@ -437,13 +422,6 @@ def mostrar_backtest(backtest, separador: str = "::") -> None:
             "pos_medias": "Posiciones",
         },
     )
-
-
-def _orden_perfiles(perfiles: dict) -> list[str]:
-    """Perfiles en la escalera de riesgo del mandato, no en orden alfabético."""
-    ordenados = [p for p in ORDEN_PERFILES if p in perfiles]
-    return ordenados + [p for p in perfiles if p not in ordenados]
-
 
 
 # =========================================================================== #
@@ -667,7 +645,7 @@ def html_pesos_por_perfil(asignacion, fondos: pd.DataFrame) -> str:
     método. Abre en Markowitz, el portafolio de referencia operativo.
     """
     tarjetas = []
-    for perfil in _orden_perfiles(asignacion.perfiles):
+    for perfil in orden_perfiles(asignacion.perfiles):
         res = asignacion.perfiles[perfil]
         metodos = list(res.pesos.columns)
         inicial = "MARKOWITZ_SHARPE" if "MARKOWITZ_SHARPE" in metodos else metodos[0]

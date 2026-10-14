@@ -434,7 +434,7 @@ def test_fallo_de_la_api_detiene_la_corrida_salvo_respaldo_explicito() -> None:
         except ConnectionError:
             pass
         datos = cargar_datos(replace(ConfigDatos(), respaldo_sintetico=True))
-        assert datos.es_sintetico
+        assert datos.origen == "SINTETICO"
     finally:
         ingestion.ClienteFIC = original
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from sklearn.covariance import LedoitWolf, ShrunkCovariance
 
 from .config import DIAS_CALENDARIO_ANIO, DIAS_HABILES_ANIO
 
@@ -141,16 +142,10 @@ def beta_contra(retornos: pd.Series, benchmark: pd.Series) -> tuple[float, float
     df = pd.concat([retornos, benchmark], axis=1, join="inner").dropna()
     if len(df) < 60:
         return np.nan, np.nan
-    y = df.iloc[:, 0].to_numpy(dtype=float)
-    x = df.iloc[:, 1].to_numpy(dtype=float)
-    if np.std(x) < 1e-12:
+    y, x = df.iloc[:, 0], df.iloc[:, 1]
+    if x.std() < 1e-12:
         return np.nan, np.nan
-    X = np.column_stack([np.ones_like(x), x])
-    coef, *_ = np.linalg.lstsq(X, y, rcond=None)
-    residuo = y - X @ coef
-    ss_tot = float(np.sum((y - y.mean()) ** 2))
-    r2 = 1.0 - float(np.sum(residuo ** 2)) / ss_tot if ss_tot > 1e-18 else np.nan
-    return float(coef[1]), r2
+    return float(y.cov(x) / x.var()), float(y.corr(x) ** 2)
 
 
 def resumen_metricas(precios: pd.Series, rf: float) -> dict[str, float]:
@@ -180,35 +175,26 @@ def matriz_covarianza(
     retornos: pd.DataFrame, ppa: float | None = None, shrinkage: float | None = None
 ) -> pd.DataFrame:
     """
-    Covarianza anualizada con shrinkage hacia el modelo de correlación
-    constante. Si `shrinkage` es None se estima la intensidad óptima con la
-    aproximación de Ledoit-Wolf; el resultado se fuerza a ser definido positivo.
+    Covarianza anualizada con shrinkage de Ledoit-Wolf (`sklearn.covariance`).
+
+    El shrinkage se aplica a los retornos estandarizados, es decir, sobre la
+    matriz de correlación, y luego se reescala con la desviación de cada fondo.
+    Contraer la covarianza cruda hacia una identidad escalada por la varianza
+    media infla la varianza de los fondos de liquidez (vol ~0,3%) con la de los
+    de renta variable (vol ~18%) y distorsiona los perfiles conservadores.
+
+    Si `shrinkage` es None se estima la intensidad óptima de Ledoit-Wolf; si no,
+    se usa la intensidad fija indicada (entre 0 y 1).
     """
     r = retornos.dropna(how="any")
     ppa = ppa or periodos_por_anio(r.index)
-    muestra = r.cov().to_numpy(dtype=float) * ppa
-    n = muestra.shape[0]
-    if n == 0:
-        return pd.DataFrame(muestra, index=r.columns, columns=r.columns)
-
-    std = np.sqrt(np.clip(np.diag(muestra), 1e-18, None))
-    corr = muestra / np.outer(std, std)
-    fuera = corr[~np.eye(n, dtype=bool)]
-    corr_media = float(np.mean(fuera)) if fuera.size else 0.0
-    objetivo = np.full((n, n), corr_media) * np.outer(std, std)
-    np.fill_diagonal(objetivo, np.diag(muestra))
-
-    if shrinkage is None:
-        # Aproximación de la intensidad óptima: crece con el ratio nº activos/nº obs.
-        t = max(len(r), 2)
-        shrinkage = float(np.clip(n / t, 0.05, 0.85))
-    shrinkage = float(np.clip(shrinkage, 0.0, 1.0))
-
-    cov = (1.0 - shrinkage) * muestra + shrinkage * objetivo
-    cov = 0.5 * (cov + cov.T)
-    autovalores = np.linalg.eigvalsh(cov)
-    if autovalores.min() <= 0:
-        cov += np.eye(n) * (abs(autovalores.min()) + 1e-10)
+    desv = r.std(ddof=0).clip(lower=1e-9)
+    estimador = (
+        LedoitWolf() if shrinkage is None
+        else ShrunkCovariance(shrinkage=float(np.clip(shrinkage, 0.0, 1.0)))
+    )
+    correlacion = estimador.fit(r / desv).covariance_
+    cov = correlacion * np.outer(desv, desv) * ppa
     return pd.DataFrame(cov, index=r.columns, columns=r.columns)
 
 

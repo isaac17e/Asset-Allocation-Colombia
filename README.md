@@ -15,7 +15,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Requires Python 3.10 or later. Dependencies: `pandas`, `numpy`, `scipy` and `sodapy`.
+Requires Python 3.10 or later. Dependencies: `pandas`, `numpy`, `scipy`, `scikit-learn` and `sodapy`.
 
 ## Usage
 
@@ -121,7 +121,7 @@ All four methods solve over **the same feasible set**, so differences come from 
 
 HRP and 1/N are brought into the mandate by **Euclidean projection** onto the feasible set: the closest admissible portfolio to the proposed one.
 
-Σ is estimated with shrinkage toward constant correlation (Ledoit-Wolf-style intensity), and μ is shrunk toward the mean of **its own asset class**, to avoid chasing whichever fund did best last quarter. The target is the class, not the universe: shrinking a money market fund toward a mean that includes equities invents an excess return over `r_f` that it doesn't have.
+Σ is estimated with Ledoit-Wolf shrinkage (`sklearn.covariance.LedoitWolf`) applied to the correlation matrix, so each fund keeps its own volatility, and μ is shrunk toward the mean of **its own asset class**, to avoid chasing whichever fund did best last quarter. The target is the class, not the universe: shrinking a money market fund toward a mean that includes equities invents an excess return over `r_f` that it doesn't have.
 
 ### 6. Tactical rebalancing
 

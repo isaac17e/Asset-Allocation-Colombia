@@ -50,16 +50,6 @@ class ResultadoAsignacion:
     cov: pd.DataFrame
     rf: float
 
-    def pesos_largos(self) -> pd.DataFrame:
-        """Formato largo (tidy) de todos los pesos, listo para exportar."""
-        filas = []
-        for nombre, res in self.perfiles.items():
-            for metodo in res.pesos.columns:
-                serie = res.pesos[metodo]
-                for fondo, peso in serie[serie > 0].items():
-                    filas.append({"perfil": nombre, "metodo": metodo, "fondo_id": fondo, "peso": peso})
-        return pd.DataFrame(filas)
-
 
 # --------------------------------------------------------------------------- #
 # Estadísticas ex-ante
@@ -90,8 +80,9 @@ def estadisticas_ex_ante(
 
     rc = contribuciones_riesgo(w_v, cov_m)
     total_rc = float(np.sum(rc))
+    clase = categorias.reindex(activos).to_numpy()
     for cat in CATEGORIAS:
-        mascara = np.array([categorias.get(a) == cat for a in activos])
+        mascara = clase == cat
         stats[f"peso_{cat}"] = float(w_v[mascara].sum()) if mascara.any() else 0.0
         stats[f"riesgo_{cat}"] = (
             float(rc[mascara].sum() / total_rc) if mascara.any() and abs(total_rc) > 1e-12 else 0.0
@@ -105,9 +96,7 @@ def _restringir_a(
     restr: RestriccionesPortafolio, conservar: set[str]
 ) -> RestriccionesPortafolio:
     """Copia las restricciones anulando la cota superior de los activos excluidos."""
-    cota_sup = np.array(
-        [restr.cota_superior[i] if a in conservar else 0.0 for i, a in enumerate(restr.activos)]
-    )
+    cota_sup = np.where(np.isin(restr.activos, list(conservar)), restr.cota_superior, 0.0)
     return RestriccionesPortafolio(
         restr.activos, restr.cota_inferior, cota_sup, restr.grupos, restr.etiqueta
     )

@@ -14,7 +14,7 @@ comité debe enterarse de la desviación, no recibir un error.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Mapping
 
 import numpy as np
@@ -121,13 +121,6 @@ PERFILES: dict[str, PerfilRiesgo] = {
 }
 
 
-def obtener_perfil(nombre: str) -> PerfilRiesgo:
-    clave = nombre.strip().upper()
-    if clave not in PERFILES:
-        raise KeyError(f"Perfil desconocido: {nombre}. Opciones: {list(PERFILES)}")
-    return PERFILES[clave]
-
-
 # --------------------------------------------------------------------------- #
 # Traducción del mandato a restricciones
 # --------------------------------------------------------------------------- #
@@ -210,31 +203,22 @@ def _indices_por_grupo(serie: pd.Series, activos: tuple[str, ...]) -> dict[str, 
 
 def _relajar_gestores(restr: RestriccionesPortafolio, tope: float) -> RestriccionesPortafolio:
     grupos = tuple(
-        GrupoRestriccion(g.nombre, g.indices, g.minimo, max(g.maximo, tope))
-        if g.nombre.startswith("GESTOR::") else g
+        replace(g, maximo=max(g.maximo, tope)) if g.nombre.startswith("GESTOR::") else g
         for g in restr.grupos
     )
-    return RestriccionesPortafolio(
-        restr.activos, restr.cota_inferior, restr.cota_superior, grupos, restr.etiqueta
-    )
+    return replace(restr, grupos=grupos)
 
 
 def _relajar_maximos_categoria(restr: RestriccionesPortafolio, factor: float) -> RestriccionesPortafolio:
     grupos = tuple(
-        GrupoRestriccion(g.nombre, g.indices, g.minimo, min(1.0, g.maximo * factor))
-        if g.nombre in CATEGORIAS else g
+        replace(g, maximo=min(1.0, g.maximo * factor)) if g.nombre in CATEGORIAS else g
         for g in restr.grupos
     )
-    return RestriccionesPortafolio(
-        restr.activos, restr.cota_inferior, restr.cota_superior, grupos, restr.etiqueta
-    )
+    return replace(restr, grupos=grupos)
 
 
 def _sin_minimos(restr: RestriccionesPortafolio) -> RestriccionesPortafolio:
-    grupos = tuple(GrupoRestriccion(g.nombre, g.indices, 0.0, g.maximo) for g in restr.grupos)
-    return RestriccionesPortafolio(
-        restr.activos, restr.cota_inferior, restr.cota_superior, grupos, restr.etiqueta
-    )
+    return replace(restr, grupos=tuple(replace(g, minimo=0.0) for g in restr.grupos))
 
 
 def _asegurar_factibilidad(
@@ -269,10 +253,7 @@ def _asegurar_factibilidad(
     # Etapa 2 — tope por fondo.
     for factor in (1.25, 1.5, 2.0, 3.0):
         tope = min(1.0, perfil.max_peso_fondo * factor)
-        candidato = RestriccionesPortafolio(
-            restr.activos, restr.cota_inferior, np.full(restr.n, tope),
-            restr.grupos, restr.etiqueta,
-        )
+        candidato = replace(restr, cota_superior=np.full(restr.n, tope))
         if candidato.punto_factible() is not None:
             notas.append(f"Tope por fondo relajado de {perfil.max_peso_fondo:.0%} a {tope:.0%}.")
             return _finalizar(candidato, perfil, notas)
@@ -308,25 +289,3 @@ def _finalizar(
     for nota in notas:
         log.warning("[%s] %s", perfil.nombre, nota)
     return restr, notas
-
-
-def resumen_politica() -> pd.DataFrame:
-    """Tabla legible de la política de inversión de los tres perfiles."""
-    filas = []
-    for perfil in PERFILES.values():
-        fila = {
-            "perfil": perfil.nombre,
-            "horizonte_meses": perfil.horizonte_meses,
-            "rv_min": perfil.rv_min,
-            "rv_max": perfil.rv_max,
-            "max_peso_fondo": perfil.max_peso_fondo,
-            "max_peso_gestor": perfil.max_peso_gestor,
-            "max_fondos": perfil.max_fondos,
-            "banda_rebalanceo": perfil.banda_rebalanceo,
-        }
-        for cat in CATEGORIAS:
-            lo, hi = perfil.limite(cat)
-            fila[f"{cat}_min"] = lo
-            fila[f"{cat}_max"] = hi
-        filas.append(fila)
-    return pd.DataFrame(filas).set_index("perfil")

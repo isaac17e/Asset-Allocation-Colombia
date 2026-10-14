@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import unicodedata
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 _LOG_FORMATO = "%(asctime)s | %(levelname)-7s | %(name)-18s | %(message)s"
@@ -14,10 +14,8 @@ _LOG_FORMATO = "%(asctime)s | %(levelname)-7s | %(name)-18s | %(message)s"
 
 def configurar_logging(nivel: int = logging.INFO) -> None:
     """Configura el logging raíz una sola vez, en formato legible para consola."""
-    root = logging.getLogger()
-    if not root.handlers:
-        logging.basicConfig(level=nivel, format=_LOG_FORMATO, datefmt="%H:%M:%S")
-    root.setLevel(nivel)
+    logging.basicConfig(level=nivel, format=_LOG_FORMATO, datefmt="%H:%M:%S")
+    logging.getLogger().setLevel(nivel)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("sodapy").setLevel(logging.ERROR)
 
@@ -56,16 +54,11 @@ def leer_cache(ruta: Path) -> pd.DataFrame | None:
 
 def normalizar_texto(texto: object) -> str:
     """Mayúsculas sin tildes ni dobles espacios, para reglas de clasificación."""
-    if texto is None or (isinstance(texto, float) and np.isnan(texto)):
+    if pd.isna(texto):
         return ""
-    s = str(texto).upper().strip()
-    reemplazos = {
-        "Á": "A", "É": "E", "Í": "I", "Ó": "O", "Ú": "U",
-        "Ä": "A", "Ë": "E", "Ï": "I", "Ö": "O", "Ü": "U", "Ñ": "N",
-    }
-    for viejo, nuevo in reemplazos.items():
-        s = s.replace(viejo, nuevo)
-    return " ".join(s.split())
+    descompuesto = unicodedata.normalize("NFKD", str(texto).upper())
+    sin_tildes = "".join(c for c in descompuesto if not unicodedata.combining(c))
+    return " ".join(sin_tildes.split())
 
 
 def a_numerico(serie: pd.Series) -> pd.Series:

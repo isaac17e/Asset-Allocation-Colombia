@@ -17,6 +17,7 @@ Reglas de interacción (ver `JS_INTERACCION`):
 
 from __future__ import annotations
 
+import html
 import json
 import math
 from dataclasses import dataclass, field
@@ -76,10 +77,14 @@ class Grafico:
 # --------------------------------------------------------------------------- #
 def esc(texto: object) -> str:
     """Escapa texto para insertarlo en atributos o nodos SVG."""
-    return (
-        str(texto)
-        .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        .replace('"', "&quot;").replace("'", "&#39;")
+    return html.escape(str(texto), quote=True)
+
+
+def orden_perfiles(perfiles) -> list[str]:
+    """Perfiles en la escalera de riesgo del mandato (no alfabética); los desconocidos van al final."""
+    return sorted(
+        perfiles,
+        key=lambda p: (ORDEN_PERFILES.index(p) if p in ORDEN_PERFILES else len(ORDEN_PERFILES), p),
     )
 
 
@@ -353,8 +358,7 @@ def grafico_universo(fondos: pd.DataFrame, rf: float) -> Grafico:
 # =========================================================================== #
 def grafico_composicion(composiciones: dict[str, pd.DataFrame]) -> Grafico:
     """Asignación por clase de activo: un panel por perfil, una barra por método."""
-    perfiles = [p for p in ORDEN_PERFILES if p in composiciones]
-    perfiles += [p for p in composiciones if p not in perfiles]
+    perfiles = orden_perfiles(composiciones)
     n_paneles = max(len(perfiles), 1)
 
     ancho, alto = 1240.0, 480.0
@@ -438,8 +442,7 @@ def grafico_equity(equity: pd.DataFrame, separador: str = "::") -> Grafico:
     """
     columnas = [c for c in equity.columns if not c.startswith("BENCH")]
     presentes = {c.split(separador)[0] for c in columnas}
-    perfiles = [p for p in ORDEN_PERFILES if p in presentes]
-    perfiles += sorted(presentes - set(perfiles))
+    perfiles = orden_perfiles(presentes)
     benchmarks = [c for c in equity.columns if c.startswith("BENCH")]
     n_paneles = max(len(perfiles), 1)
 

@@ -61,8 +61,7 @@ def evaluar_bandas(
     """
     actual = pesos_por_categoria(pesos_actuales, categorias)
     objetivo = pesos_por_categoria(pesos_objetivo, categorias)
-    idx = objetivo.index.union(actual.index)
-    actual, objetivo = actual.reindex(idx).fillna(0.0), objetivo.reindex(idx).fillna(0.0)
+    actual, objetivo = actual.align(objetivo, fill_value=0.0)
 
     desviacion = actual - objetivo
     tabla = pd.DataFrame(
@@ -107,9 +106,7 @@ def evaluar_bandas_fondo(
     pesos_actuales: pd.Series, pesos_objetivo: pd.Series, banda: float = 0.03
 ) -> pd.DataFrame:
     """Control de deriva a nivel de fondo individual."""
-    idx = pesos_objetivo.index.union(pesos_actuales.index)
-    objetivo = pesos_objetivo.reindex(idx).fillna(0.0)
-    actual = pesos_actuales.reindex(idx).fillna(0.0)
+    actual, objetivo = pesos_actuales.align(pesos_objetivo, fill_value=0.0)
     tabla = pd.DataFrame({"peso_objetivo": objetivo, "peso_actual": actual})
     tabla["desviacion_pp"] = tabla["peso_actual"] - tabla["peso_objetivo"]
     tabla["estado"] = np.where(tabla["desviacion_pp"].abs() > banda, "ALERTA", "OK")
@@ -127,11 +124,8 @@ def plan_ordenes(
     Las órdenes por debajo de `umbral_minimo` se omiten: su beneficio de
     tracking no compensa el costo operativo ni el impacto fiscal.
     """
-    idx = pesos_objetivo.index.union(pesos_actuales.index)
-    objetivo = pesos_objetivo.reindex(idx).fillna(0.0)
-    actual = pesos_actuales.reindex(idx).fillna(0.0)
-    delta = objetivo - actual
-    delta[delta.abs() < umbral_minimo] = 0.0
+    actual, objetivo = pesos_actuales.align(pesos_objetivo, fill_value=0.0)
+    delta = (objetivo - actual).mask(lambda d: d.abs() < umbral_minimo, 0.0)
 
     ordenes = pd.DataFrame(
         {
@@ -176,7 +170,7 @@ def informe_tactico(
     días calendario y evalúa las bandas contra los pesos objetivo vigentes.
     """
     inicio = precios.index[-1] - pd.Timedelta(days=dias_deriva)
-    desde = precios.index[precios.index >= inicio][0]
+    desde = precios.index[precios.index.searchsorted(inicio)]
     actuales = derivar_pesos(pesos_objetivo, precios, desde)
     bandas_cat = evaluar_bandas(actuales, pesos_objetivo, categorias, banda_categoria)
     bandas_fondo = evaluar_bandas_fondo(actuales, pesos_objetivo, banda_fondo)

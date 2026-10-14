@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
-from scipy.cluster.hierarchy import linkage
+from scipy.cluster.hierarchy import leaves_list, linkage
 from scipy.optimize import linprog, minimize
 from scipy.spatial.distance import squareform
 
@@ -424,21 +424,6 @@ def optimizar_equiponderado(restr: RestriccionesPortafolio) -> np.ndarray:
 # --------------------------------------------------------------------------- #
 # HRP — Hierarchical Risk Parity
 # --------------------------------------------------------------------------- #
-def _quasi_diagonalizar(enlace: np.ndarray) -> list[int]:
-    """Reordena los activos siguiendo el dendrograma (López de Prado, 2016)."""
-    enlace = enlace.astype(int)
-    orden = pd.Series([enlace[-1, 0], enlace[-1, 1]])
-    n_items = enlace[-1, 3]
-    while orden.max() >= n_items:
-        orden.index = range(0, orden.shape[0] * 2, 2)
-        clusters = orden[orden >= n_items]
-        i, j = clusters.index, clusters.to_numpy() - n_items
-        orden[i] = enlace[j, 0]
-        orden = pd.concat([orden, pd.Series(enlace[j, 1], index=i + 1)]).sort_index()
-        orden.index = range(orden.shape[0])
-    return orden.tolist()
-
-
 def _varianza_cluster(cov: np.ndarray, indices: list[int]) -> float:
     """Varianza de un subcluster ponderado por el inverso de la varianza."""
     sub = cov[np.ix_(indices, indices)]
@@ -484,7 +469,7 @@ def optimizar_hrp(cov: np.ndarray, restr: RestriccionesPortafolio) -> np.ndarray
     dist = np.sqrt(np.clip((1.0 - corr) / 2.0, 0.0, None))
     np.fill_diagonal(dist, 0.0)
     enlace = linkage(squareform(dist, checks=False), method="single")
-    orden = _quasi_diagonalizar(enlace)
+    orden = leaves_list(enlace).tolist()  # cuasi-diagonalización (López de Prado, 2016)
     w_hrp = _bisecar(cov, orden)
     w_hrp = w_hrp / w_hrp.sum()
     return restr.proyectar(w_hrp)

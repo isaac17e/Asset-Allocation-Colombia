@@ -32,6 +32,7 @@ from .metrics import (
 )
 from .optimizers import limpiar_pesos, resolver
 from .profiles import PERFILES, construir_restricciones
+from .rebalancing import derivar_pesos
 from .universe import UniversoCurado, calcular_rf_dinamica, clasificar_fondos
 from .allocation import aplicar_cardinalidad
 from .utils import get_logger
@@ -73,15 +74,6 @@ def _crecimiento_tramo(precios_tramo: pd.DataFrame, pesos: pd.Series) -> pd.Seri
     w = pesos.reindex(activos).fillna(0.0).to_numpy(dtype=float)
     crecimiento = p.div(p.iloc[0], axis=1).to_numpy(dtype=float)
     return pd.Series(crecimiento @ w, index=p.index)
-
-
-def _pesos_derivados(precios_tramo: pd.DataFrame, pesos: pd.Series) -> pd.Series:
-    """Pesos al cierre del tramo tras la deriva de mercado."""
-    activos = [a for a in pesos.index if a in precios_tramo.columns]
-    p = precios_tramo[activos]
-    valor = pesos.reindex(activos).fillna(0.0) * (p.iloc[-1] / p.iloc[0])
-    total = float(valor.sum())
-    return valor / total if total > 0 else pesos
 
 
 def _universo_ventana(precios: pd.DataFrame, ventana: pd.DataFrame, min_vol: float = 1e-6) -> list[str]:
@@ -170,7 +162,7 @@ def ejecutar_backtest(
                 valores[clave].append(curva.iloc[1:] if i > 0 else curva)
                 nivel[clave] = float(curva.iloc[-1])
 
-                pesos_previos[clave] = _pesos_derivados(tramo, w)
+                pesos_previos[clave] = derivar_pesos(w, tramo)
                 historial_pesos[clave].append(w.rename(fecha))
                 bitacora.append(
                     {
@@ -206,10 +198,7 @@ def ejecutar_backtest(
 
 def _turnover(anterior: pd.Series, nuevo: pd.Series) -> float:
     """Rotación de una cara: media suma de diferencias absolutas de pesos."""
-    idx = anterior.index.union(nuevo.index)
-    a = anterior.reindex(idx).fillna(0.0)
-    b = nuevo.reindex(idx).fillna(0.0)
-    return float((b - a).abs().sum() / 2.0)
+    return float(nuevo.sub(anterior, fill_value=0.0).abs().sum() / 2.0)
 
 
 def _benchmarks(

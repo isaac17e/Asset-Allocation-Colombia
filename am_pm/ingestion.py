@@ -52,10 +52,6 @@ class DatosFIC:
     fecha_corte: pd.Timestamp
     origen: str  # "SODA" | "CACHE" | "SINTETICO"
 
-    @property
-    def es_sintetico(self) -> bool:
-        return self.origen == "SINTETICO"
-
 
 class ClienteFIC:
     """Envoltorio delgado sobre `sodapy.Socrata` con paginación y reintentos."""

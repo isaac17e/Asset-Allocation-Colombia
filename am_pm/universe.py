@@ -94,12 +94,6 @@ class UniversoCurado:
     def ids(self) -> list[str]:
         return list(self.fondos.index)
 
-    def por_categoria(self) -> dict[str, list[str]]:
-        return {
-            cat: list(grupo.index)
-            for cat, grupo in self.fondos.groupby("categoria", observed=True)
-        }
-
     def mapa_categoria(self) -> pd.Series:
         return self.fondos["categoria"]
 
@@ -401,20 +395,14 @@ def construir_universo(
         log.warning("Sin proxy internacional/FX: no se podrá separar RV_INTERNACIONAL por betas.")
 
     clasificacion = clasificar_fondos(retornos, metadatos, (proxy_local, proxy_intl))
-    fondos = pd.DataFrame(
-        {
-            "nombre_patrimonio": metadatos["nombre_patrimonio"],
-            "nombre_entidad": metadatos["nombre_entidad"],
-            "codigo_entidad": metadatos["codigo_entidad"],
-            "nombre_subtipo_patrimonio": metadatos["nombre_subtipo_patrimonio"],
-        }
-    )
-    fondos = fondos.join(clasificacion.drop(columns="vol_anual"))
+    fondos = metadatos[
+        ["nombre_patrimonio", "nombre_entidad", "codigo_entidad", "nombre_subtipo_patrimonio"]
+    ].join(clasificacion.drop(columns="vol_anual"))
     fondos["aum_cop"] = metadatos["valor_fondo_cierre_dia_t"]
     fondos["retorno_anual"] = precios.apply(retorno_anualizado)
     fondos["vol_anual"] = clasificacion["vol_anual"]
     fondos["max_drawdown"] = precios.apply(max_drawdown)
-    fondos["n_obs"] = precios.notna().sum().astype(int)
+    fondos["n_obs"] = precios.count()
     fondos.index.name = "fondo_id"
 
     # --- r_f dinámica y métricas ajustadas por riesgo ----------------------
@@ -463,15 +451,14 @@ def _metadatos_fondos(snapshot: pd.DataFrame, ids: pd.Index) -> pd.DataFrame:
         "nombre_patrimonio", "nombre_entidad", "codigo_entidad",
         "nombre_subtipo_patrimonio", "valor_fondo_cierre_dia_t",
     ]
-    for col in columnas:
-        if col not in snap.columns:
-            snap[col] = np.nan
-    meta = snap.reindex(ids)[columnas]
-    meta["nombre_patrimonio"] = meta["nombre_patrimonio"].fillna("SIN NOMBRE")
-    meta["nombre_entidad"] = meta["nombre_entidad"].fillna("SIN GESTOR")
-    meta["codigo_entidad"] = meta["codigo_entidad"].fillna("NA").astype(str)
-    meta["nombre_subtipo_patrimonio"] = meta["nombre_subtipo_patrimonio"].fillna("")
-    meta["valor_fondo_cierre_dia_t"] = meta["valor_fondo_cierre_dia_t"].fillna(0.0)
+    meta = snap.reindex(index=ids, columns=columnas).fillna(
+        {
+            "nombre_patrimonio": "SIN NOMBRE", "nombre_entidad": "SIN GESTOR",
+            "codigo_entidad": "NA", "nombre_subtipo_patrimonio": "",
+            "valor_fondo_cierre_dia_t": 0.0,
+        }
+    )
+    meta["codigo_entidad"] = meta["codigo_entidad"].astype(str)
     return meta
 
 
@@ -483,14 +470,10 @@ def _recortar_top_n(fondos: pd.DataFrame, top_n: int) -> pd.DataFrame:
     """
     if len(fondos) <= top_n:
         return fondos
-    minimo_por_categoria = 3
-    elegidos: list[str] = []
-    for _cat, grupo in fondos.groupby("categoria", observed=True):
-        elegidos.extend(grupo.sort_values("aum_cop", ascending=False).head(minimo_por_categoria).index)
-    restantes = fondos.drop(index=elegidos).sort_values("aum_cop", ascending=False)
-    faltan = max(0, top_n - len(elegidos))
-    elegidos.extend(restantes.head(faltan).index)
-    return fondos.loc[fondos.index.isin(elegidos)]
+    por_aum = fondos.sort_values("aum_cop", ascending=False)
+    base = por_aum.groupby("categoria", observed=True).head(3).index
+    resto = por_aum.drop(index=base).head(max(0, top_n - len(base))).index
+    return fondos.loc[fondos.index.isin(base.union(resto))]
 
 
 def _reportar_composicion(fondos: pd.DataFrame) -> None:
